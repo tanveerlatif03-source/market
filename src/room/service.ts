@@ -1,0 +1,1284 @@
+import { MarketError } from '../errors.ts';
+import { EventBus } from '../events.ts';
+import { MarketStore } from '../store/store.ts';
+import { hashToken, newToken, nowIso, shortId, slugify } from '../ids.ts';
+import { normalizePath, ownersOfPaths, pathsOutsideLane } from '../paths.ts';
+import { DEFAULT_MESSAGE_BUDGET, HUMAN_ID, PLAN_TASK_ID } from './seed.ts';
+import { agentRoomView, supervisorRoomView } from './views.ts';
+import type { AgentRoomView, SupervisorRoomView } from './views.ts';
+import type {
+  Agent,
+  AgentScope,
+  AgentStatus,
+  Decision,
+  MarketData,
+  MessageKind,
+  Room,
+  RoomEvent,
+  SeamCheck,
+  Submission,
+  SubmissionOutcome,
+  Task,
+  Thread,
+  TokenRecord
+} from '../types.ts';
+
+/** An ask or an answer, not a transcript of how you got there. */
+const MAX_MESSAGE_CHARS = 2000;
+
+export interface Principal {
+  kind: 'agent' | 'supervisor';
+  agentId: string | null;
+  label: string;
+  tokenId: string;
+}
+
+export interface StatusInput {
+  /** Goes to the human only. Never enters a thread. */
+  statusNote?: string;
+}
+
+export interface ReadRoomInput extends StatusInput {
+  sinceSeq?: number;
+}
+
+export interface ClaimTaskInput extends StatusInput {
+  taskId: string;
+}
+
+export interface PostMessageInput extends StatusInput {
+  taskId: string;
+  to?: string[];
+  threadId?: string;
+  subject?: string;
+  kind: MessageKind;
+  body: string;
+}
+
+export interface PlanProposalTask {
+  key: string;
+  title: string;
+  description?: string;
+  paths: string[];
+  suggestedOwner?: string;
+  messageBudget?: number;
+}
+
+export interface PlanProposalSeam {
+  title: string;
+  body: string;
+  /** The two task keys whose pieces touch. */
+  between: [string, string];
+  contract: { task: string; provides: string; expects: string }[];
+}
+
+export interface PlanProposal {
+  summary?: string;
+  tasks: PlanProposalTask[];
+  seams: PlanProposalSeam[];
+  decisions?: { title: string; body: string }[];
+}
+
+export interface SubmitWorkInput extends StatusInput {
+  taskId: string;
+  summary: string;
+  filesChanged?: string[];
+  seamChecks?: SeamCheck[];
+  outcome: SubmissionOutcome;
+  plan?: PlanProposal;
+}
+
+export interface ClaimTaskResult {
+  task: Task;
+  message: string;
+}
+
+export interface PostMessageResult {
+  threadId: string;
+  messageId: string;
+  delivered: string[];
+  budgetRemaining: number;
+  message: string;
+}
+
+export interface SubmitWorkResult {
+  task: Task;
+  submissionId: string | null;
+  message: string;
+  nextStep: string;
+}
+
+type EmitFn = (event: Omit<RoomEvent, 'seq' | 'at'>) => void;
+
+function unique(values: readonly string[]): string[] {
+  return [...new Set(values)];
+}
+
+function sameParticipants(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((value, index) => value === sortedB[index]);
+}
+
+function scopeAllows(agent: Agent, taskId: string): boolean {
+  return agent.scope.writeTasks.includes('*') || agent.scope.writeTasks.includes(taskId);
+}
+
+/**
+ * Every rule in Market lives here: who owns what, who may say what to whom,
+ * what a seam costs to cross, and when an agent has to stop and ask the human.
+ */
+export class RoomService {
+  private readonly store: MarketStore;
+  private readonly bus: EventBus;
+
+  constructor(store: MarketStore, bus: EventBus) {
+    this.store = store;
+    this.bus = bus;
+  }
+
+  events(): EventBus {
+    return this.bus;
+  }
+
+  // ---------------------------------------------------------------- identity
+
+  authenticate(token: string): Principal | null {
+    if (token.length === 0) return null;
+    const hash = hashToken(token);
+    return this.store.read((data) => {
+      const record = data.tokens.find((entry) => entry.hash === hash && entry.revokedAt === null);
+      if (record === undefined) return null;
+      if (record.kind === 'agent') {
+        const agent = data.room.agents.find((candidate) => candidate.id === record.agentId);
+        if (agent === undefined) return null;
+      }
+      return {
+        kind: record.kind,
+        agentId: record.agentId,
+        label: record.label,
+        tokenId: record.id
+      } satisfies Principal;
+    });
+  }
+
+  snapshot(): Room {
+    return this.store.read((data) => data.room);
+  }
+
+  // ------------------------------------------------------------ the four tools
+
+  /** What the room looks like from where this agent sits. */
+  async readRoom(agentId: string, input: ReadRoomInput = {}): Promise<AgentRoomView> {
+    return this.apply((data, emit) => {
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.touchStatus(agent, emit, { note: input.statusNote });
+      return agentRoomView(data.room, agent, { sinceSeq: input.sinceSeq ?? 0 });
+    });
+  }
+
+  /** Take exactly one task. Nobody else may touch it until it is handed back. */
+  async claimTask(agentId: string, input: ClaimTaskInput): Promise<ClaimTaskResult> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+      const task = this.taskOf(room, input.taskId);
+
+      if (task.id === PLAN_TASK_ID) {
+        if (agent.role !== 'lead') {
+          throw new MarketError(
+            'NOT_LEAD',
+            'Only the room lead proposes the plan.',
+            `Wait for ${room.lead ?? 'the lead'} to propose a split, or discuss the seams with post_message.`,
+            { lead: room.lead }
+          );
+        }
+      } else {
+        if (room.plan.status !== 'approved') {
+          throw new MarketError(
+            'PLAN_NOT_APPROVED',
+            `The plan is "${room.plan.status}", so no task is claimable yet.`,
+            'Wait for the human to approve the plan, then claim again.',
+            { planStatus: room.plan.status }
+          );
+        }
+        if (!scopeAllows(agent, task.id)) {
+          throw new MarketError(
+            'OUT_OF_SCOPE',
+            `Your permission scope does not cover "${task.id}".`,
+            'Ask the human to widen your scope, or claim a task you are scoped for.',
+            { writeTasks: agent.scope.writeTasks }
+          );
+        }
+      }
+
+      if (task.owner === agent.id) {
+        this.touchStatus(agent, emit, { note: input.statusNote, state: 'working', taskId: task.id });
+        return { task, message: `You already own "${task.id}".` };
+      }
+
+      if (task.owner !== null) {
+        throw new MarketError(
+          'TASK_OWNED',
+          `"${task.id}" is owned by ${task.owner}.`,
+          `One owner per task. Ask ${task.owner} in the thread: post_message with task_id "${task.id}" and kind "ask".`,
+          { owner: task.owner, status: task.status }
+        );
+      }
+
+      if (task.status !== 'open') {
+        throw new MarketError(
+          'INVALID',
+          `"${task.id}" is ${task.status}, not open.`,
+          'Ask the human to reopen it if it needs more work.',
+          { status: task.status }
+        );
+      }
+
+      const at = nowIso();
+      task.owner = agent.id;
+      task.status = 'claimed';
+      task.claimedAt = at;
+      task.updatedAt = at;
+
+      emit({
+        type: 'task.claimed',
+        actor: agent.id,
+        taskId: task.id,
+        threadId: null,
+        summary: `${agent.displayName} claimed "${task.id}".`,
+        audience: []
+      });
+      this.touchStatus(agent, emit, { note: input.statusNote, state: 'working', taskId: task.id });
+
+      const lane = task.paths.length > 0 ? task.paths.join(', ') : 'no declared paths';
+      return {
+        task,
+        message: `You own "${task.id}". Your lane is ${lane}. Finish with submit_work.`
+      };
+    });
+  }
+
+  /** Coordination between agents. Attached to a task, and paid for out of its budget. */
+  async postMessage(agentId: string, input: PostMessageInput): Promise<PostMessageResult> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+      const task = this.taskOf(room, input.taskId);
+
+      const body = input.body.trim();
+      if (body.length === 0) {
+        throw new MarketError('INVALID', 'The message body is empty.', 'Say the ask or the answer.');
+      }
+      if (body.length > MAX_MESSAGE_CHARS) {
+        throw new MarketError(
+          'INVALID',
+          `The message is ${body.length} characters; the limit is ${MAX_MESSAGE_CHARS}.`,
+          'Send the ask or the answer, not the reasoning behind it. Reasoning belongs in status_note, which only the human reads.',
+          { limit: MAX_MESSAGE_CHARS }
+        );
+      }
+
+      if (task.messagesUsed >= task.messageBudget) {
+        this.haltOnBudget(room, task, emit);
+        throw new MarketError(
+          'BUDGET_EXHAUSTED',
+          `"${task.id}" has used all ${task.messageBudget} of its messages.`,
+          'Stop and wait. The human has been asked to raise the budget or redirect the work.',
+          { messageBudget: task.messageBudget, messagesUsed: task.messagesUsed }
+        );
+      }
+
+      const thread = this.resolveThread(room, agent, task, input);
+      const at = nowIso();
+      const message = {
+        id: shortId('msg'),
+        threadId: thread.id,
+        taskId: task.id,
+        from: agent.id,
+        kind: input.kind,
+        body,
+        createdAt: at
+      };
+      thread.messages.push(message);
+      thread.updatedAt = at;
+      task.messagesUsed += 1;
+      task.updatedAt = at;
+
+      const delivered = thread.participants.filter((participant) => participant !== agent.id);
+      emit({
+        type: 'message.posted',
+        actor: agent.id,
+        taskId: task.id,
+        threadId: thread.id,
+        summary: `${agent.displayName} sent an ${input.kind} to ${delivered.join(', ')} on "${task.id}".`,
+        audience: delivered
+      });
+
+      if (task.messagesUsed >= task.messageBudget) {
+        this.haltOnBudget(room, task, emit);
+      }
+
+      this.touchStatus(agent, emit, {
+        note: input.statusNote,
+        state: input.kind === 'ask' ? 'waiting' : 'working',
+        taskId: task.id
+      });
+
+      const remaining = task.messageBudget - task.messagesUsed;
+      return {
+        threadId: thread.id,
+        messageId: message.id,
+        delivered,
+        budgetRemaining: remaining,
+        message:
+          remaining > 0
+            ? `Delivered to ${delivered.join(', ')}. ${remaining} message(s) left on "${task.id}".`
+            : `Delivered. "${task.id}" has now spent its message budget and has stopped to ask the human.`
+      };
+    });
+  }
+
+  /** Hand the work back: the plan, if this is the plan task, otherwise the result. */
+  async submitWork(agentId: string, input: SubmitWorkInput): Promise<SubmitWorkResult> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+      const task = this.taskOf(room, input.taskId);
+
+      if (task.owner !== agent.id) {
+        throw new MarketError(
+          'NOT_OWNER',
+          `"${task.id}" is owned by ${task.owner ?? 'nobody'}.`,
+          task.owner === null
+            ? 'Claim it first with claim_task.'
+            : `Ask ${task.owner} in the thread rather than submitting on their behalf.`,
+          { owner: task.owner }
+        );
+      }
+
+      if (task.id === PLAN_TASK_ID) {
+        return this.submitPlan(room, agent, task, input, emit);
+      }
+
+      if (room.plan.status !== 'approved') {
+        throw new MarketError(
+          'PLAN_NOT_APPROVED',
+          `The plan is "${room.plan.status}".`,
+          'Wait for the human to approve the plan before submitting work.',
+          { planStatus: room.plan.status }
+        );
+      }
+
+      const filesChanged = (input.filesChanged ?? []).map(normalizePath);
+      const outside = pathsOutsideLane(filesChanged, task.paths);
+      if (outside.length > 0) {
+        const owners = ownersOfPaths(outside, room.tasks, task.id);
+        const owner = owners.find((hit) => hit.owner !== null);
+        throw new MarketError(
+          'OUT_OF_SCOPE',
+          `These files are outside the lane of "${task.id}": ${outside.join(', ')}.`,
+          owner === undefined
+            ? 'Claim, do not merge. Ask the human to widen this task or open a task that owns those paths.'
+            : `"${owner.path}" belongs to "${owner.taskId}". Ask ${owner.owner} in the thread instead of editing it.`,
+          { outside, lane: task.paths, owners }
+        );
+      }
+
+      const seamChecks = input.seamChecks ?? [];
+      for (const check of seamChecks) {
+        if (!room.decisions.some((decision) => decision.id === check.decisionId)) {
+          throw new MarketError(
+            'NOT_FOUND',
+            `No decision "${check.decisionId}" in this room.`,
+            'Use the decision ids from read_room.',
+            { decisionId: check.decisionId }
+          );
+        }
+      }
+
+      if (input.outcome === 'complete' && task.seams.length > 0) {
+        const checked = new Map(seamChecks.map((check) => [check.decisionId, check]));
+        const missing = task.seams.filter((seamId) => !checked.has(seamId));
+        if (missing.length > 0) {
+          throw new MarketError(
+            'INVALID',
+            `"${task.id}" touches ${task.seams.length} seam(s); ${missing.join(', ')} went unconfirmed.`,
+            'Both sides build toward a fixed point, so confirm each seam in seam_checks before calling this complete.',
+            { missing }
+          );
+        }
+        const unsatisfied = task.seams.filter((seamId) => checked.get(seamId)?.satisfied === false);
+        if (unsatisfied.length > 0) {
+          throw new MarketError(
+            'INVALID',
+            `Seam(s) ${unsatisfied.join(', ')} are not satisfied, so this is not complete.`,
+            'Submit with outcome "needs-review" or "blocked", and say in the thread what changed on your side.',
+            { unsatisfied }
+          );
+        }
+      }
+
+      const at = nowIso();
+      const submission: Submission = {
+        id: shortId('sub'),
+        taskId: task.id,
+        by: agent.id,
+        summary: input.summary,
+        filesChanged,
+        seamChecks,
+        outcome: input.outcome,
+        createdAt: at
+      };
+      task.submissions.push(submission);
+      task.updatedAt = at;
+
+      if (input.outcome === 'blocked') {
+        task.status = 'blocked';
+        task.blockedReason = input.summary;
+      } else {
+        task.status = 'submitted';
+        task.blockedReason = null;
+      }
+
+      const audience = unique([
+        ...this.seamPartnerAgents(room, task),
+        ...(room.lead !== null ? [room.lead] : []),
+        HUMAN_ID
+      ]).filter((id) => id !== agent.id);
+
+      emit({
+        type: input.outcome === 'blocked' ? 'task.blocked' : 'task.submitted',
+        actor: agent.id,
+        taskId: task.id,
+        threadId: null,
+        summary:
+          input.outcome === 'blocked'
+            ? `${agent.displayName} is blocked on "${task.id}": ${input.summary}`
+            : `${agent.displayName} submitted "${task.id}" (${input.outcome}).`,
+        audience
+      });
+
+      this.touchStatus(agent, emit, {
+        note: input.statusNote,
+        state: input.outcome === 'blocked' ? 'blocked' : input.outcome === 'complete' ? 'done' : 'waiting',
+        taskId: task.id
+      });
+
+      return {
+        task,
+        submissionId: submission.id,
+        message: `Submitted "${task.id}" as ${input.outcome}.`,
+        nextStep:
+          input.outcome === 'blocked'
+            ? 'The human has been told you are blocked. Wait to be unblocked or redirected.'
+            : 'The human reviews and accepts it. Do not start another lane without claiming it.'
+      };
+    });
+  }
+
+  // ------------------------------------------------------------- planning
+
+  private submitPlan(
+    room: Room,
+    agent: Agent,
+    planTask: Task,
+    input: SubmitWorkInput,
+    emit: EmitFn
+  ): SubmitWorkResult {
+    if (agent.role !== 'lead') {
+      throw new MarketError('NOT_LEAD', 'Only the room lead proposes the plan.', 'Leave the plan to the lead.');
+    }
+    if (room.plan.status === 'approved') {
+      throw new MarketError(
+        'INVALID',
+        'The plan is already approved.',
+        'Ask the human to reopen the plan before changing the split; others have built on it.'
+      );
+    }
+    const proposal = input.plan;
+    if (proposal === undefined || proposal.tasks.length === 0) {
+      throw new MarketError(
+        'INVALID',
+        'A plan proposal needs at least one task.',
+        'Pass a "plan" object with the task split and the seam between every pair of tasks that touch.'
+      );
+    }
+
+    const keys = proposal.tasks.map((task) => task.key);
+    if (new Set(keys).size !== keys.length) {
+      throw new MarketError('INVALID', 'Task keys must be unique.', 'Give every task in the split its own key.');
+    }
+    for (const seam of proposal.seams) {
+      for (const key of seam.between) {
+        if (!keys.includes(key)) {
+          throw new MarketError(
+            'INVALID',
+            `Seam "${seam.title}" refers to unknown task key "${key}".`,
+            'Seams may only join tasks in this proposal.',
+            { key }
+          );
+        }
+      }
+      for (const side of seam.contract) {
+        if (!seam.between.includes(side.task)) {
+          throw new MarketError(
+            'INVALID',
+            `Seam "${seam.title}" has a contract for "${side.task}", which is not one of its two sides.`,
+            'A seam contract describes exactly the two tasks that touch.',
+            { task: side.task }
+          );
+        }
+      }
+    }
+
+    const at = nowIso();
+
+    // A re-proposal replaces the previous one wholesale. General decisions the
+    // human recorded stay; the previous split and its seams do not.
+    room.tasks = room.tasks.filter((task) => task.id === PLAN_TASK_ID);
+    room.decisions = room.decisions.filter((decision) => decision.kind === 'general');
+    const liveTaskIds = new Set(room.tasks.map((task) => task.id));
+    room.threads = room.threads.filter((thread) => liveTaskIds.has(thread.taskId));
+
+    const idByKey = new Map<string, string>();
+    for (const proposed of proposal.tasks) {
+      const id = this.uniqueTaskId(room, slugify(proposed.key || proposed.title));
+      idByKey.set(proposed.key, id);
+      room.tasks.push({
+        id,
+        title: proposed.title,
+        description: proposed.description ?? '',
+        owner: null,
+        suggestedOwner: proposed.suggestedOwner ?? null,
+        status: 'draft',
+        paths: proposed.paths.map(normalizePath),
+        seams: [],
+        messageBudget: proposed.messageBudget ?? room.defaultMessageBudget,
+        messagesUsed: 0,
+        budgetHaltedAt: null,
+        blockedReason: null,
+        claimedAt: null,
+        createdAt: at,
+        updatedAt: at,
+        submissions: []
+      });
+      emit({
+        type: 'task.created',
+        actor: agent.id,
+        taskId: id,
+        threadId: null,
+        summary: `"${id}" — ${proposed.title} (${proposed.paths.join(', ') || 'no paths'})`,
+        audience: []
+      });
+    }
+
+    for (const seam of proposal.seams) {
+      const left = idByKey.get(seam.between[0]) as string;
+      const right = idByKey.get(seam.between[1]) as string;
+      const decision: Decision = {
+        id: shortId('dec'),
+        kind: 'seam',
+        title: seam.title,
+        body: seam.body,
+        seam: {
+          betweenTasks: [left, right],
+          contract: seam.contract.map((side) => ({
+            taskId: idByKey.get(side.task) as string,
+            provides: side.provides,
+            expects: side.expects
+          }))
+        },
+        proposedBy: agent.id,
+        createdAt: at,
+        version: 1
+      };
+      room.decisions.push(decision);
+      for (const taskId of [left, right]) {
+        const task = room.tasks.find((candidate) => candidate.id === taskId);
+        if (task !== undefined) task.seams.push(decision.id);
+      }
+      emit({
+        type: 'decision.recorded',
+        actor: agent.id,
+        taskId: null,
+        threadId: null,
+        summary: `Seam "${seam.title}" between "${left}" and "${right}".`,
+        audience: []
+      });
+    }
+
+    for (const extra of proposal.decisions ?? []) {
+      room.decisions.push({
+        id: shortId('dec'),
+        kind: 'general',
+        title: extra.title,
+        body: extra.body,
+        seam: null,
+        proposedBy: agent.id,
+        createdAt: at,
+        version: 1
+      });
+    }
+
+    room.decisions.push({
+      id: shortId('dec'),
+      kind: 'plan',
+      title: `Task split, revision ${room.plan.revision + 1}`,
+      body:
+        proposal.summary ??
+        proposal.tasks.map((task) => `${idByKey.get(task.key)}: ${task.title}`).join('\n'),
+      seam: null,
+      proposedBy: agent.id,
+      createdAt: at,
+      version: room.plan.revision + 1
+    });
+
+    room.plan = {
+      status: 'proposed',
+      proposedBy: agent.id,
+      proposedAt: at,
+      decidedBy: null,
+      decidedAt: null,
+      note: null,
+      revision: room.plan.revision + 1
+    };
+
+    const submission: Submission = {
+      id: shortId('sub'),
+      taskId: planTask.id,
+      by: agent.id,
+      summary: input.summary,
+      filesChanged: [],
+      seamChecks: [],
+      outcome: 'needs-review',
+      createdAt: at
+    };
+    planTask.submissions.push(submission);
+    planTask.status = 'submitted';
+    planTask.updatedAt = at;
+
+    const unseamed = room.tasks.filter(
+      (task) => task.id !== PLAN_TASK_ID && task.seams.length === 0
+    );
+
+    emit({
+      type: 'plan.proposed',
+      actor: agent.id,
+      taskId: null,
+      threadId: null,
+      summary: `${agent.displayName} proposed a ${proposal.tasks.length}-task split with ${proposal.seams.length} seam(s).`,
+      audience: []
+    });
+    this.touchStatus(agent, emit, { note: input.statusNote, state: 'waiting', taskId: planTask.id });
+
+    return {
+      task: planTask,
+      submissionId: submission.id,
+      message: `Proposed ${proposal.tasks.length} task(s) and ${proposal.seams.length} seam(s).`,
+      nextStep:
+        unseamed.length > 0
+          ? `The human approves in one tap. Note that ${unseamed
+              .map((task) => `"${task.id}"`)
+              .join(', ')} declared no seam — if those pieces touch anything, agree the seam now, not at merge time.`
+          : 'The human approves in one tap, and then everyone is a peer executing.'
+    };
+  }
+
+  // ------------------------------------------------------- human controls
+
+  supervisorView(): SupervisorRoomView {
+    return this.store.read((data) => supervisorRoomView(data.room));
+  }
+
+  async setGoal(goal: string): Promise<Room> {
+    return this.apply((data) => {
+      data.room.goal = goal;
+      return data.room;
+    });
+  }
+
+  async addAgent(options: {
+    id?: string;
+    displayName: string;
+    provider: string;
+    role: 'lead' | 'peer';
+    scope?: Partial<AgentScope>;
+  }): Promise<{ agent: Agent; token: string }> {
+    const token = newToken();
+    const agent = await this.apply((data, emit) => {
+      const room = data.room;
+      const id = slugify(options.id ?? options.displayName, 'agent');
+      if (room.agents.some((existing) => existing.id === id)) {
+        throw new MarketError('INVALID', `An agent "${id}" is already in this room.`, 'Pick another id.');
+      }
+      if (options.role === 'lead' && room.lead !== null) {
+        throw new MarketError(
+          'INVALID',
+          `"${room.lead}" is already lead of this room.`,
+          'A room has one lead. Add this agent as a peer.'
+        );
+      }
+      const at = nowIso();
+      const created: Agent = {
+        id,
+        displayName: options.displayName,
+        provider: options.provider,
+        role: options.role,
+        scope: {
+          readPaths: options.scope?.readPaths ?? ['**'],
+          writeTasks: options.scope?.writeTasks ?? ['*']
+        },
+        paused: false,
+        pausedReason: null,
+        status: { state: 'idle', taskId: null, note: '', updatedAt: at },
+        joinedAt: at,
+        lastSeenAt: null
+      };
+      room.agents.push(created);
+      if (options.role === 'lead') room.lead = id;
+
+      const record: TokenRecord = {
+        id: shortId('tok'),
+        kind: 'agent',
+        agentId: id,
+        label: `${options.displayName} (${options.provider})`,
+        hash: hashToken(token),
+        createdAt: at,
+        revokedAt: null
+      };
+      data.tokens.push(record);
+
+      emit({
+        type: 'agent.joined',
+        actor: id,
+        taskId: null,
+        threadId: null,
+        summary: `${options.displayName} (${options.provider}) was added as ${options.role}.`,
+        audience: []
+      });
+      return created;
+    });
+    return { agent, token };
+  }
+
+  async createSupervisorToken(label: string): Promise<string> {
+    const token = newToken();
+    await this.apply((data) => {
+      data.tokens.push({
+        id: shortId('tok'),
+        kind: 'supervisor',
+        agentId: null,
+        label,
+        hash: hashToken(token),
+        createdAt: nowIso(),
+        revokedAt: null
+      });
+    });
+    return token;
+  }
+
+  async approvePlan(note: string | null = null): Promise<Room> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      if (room.plan.status !== 'proposed') {
+        throw new MarketError(
+          'INVALID',
+          `The plan is "${room.plan.status}", so there is nothing to approve.`,
+          'Wait for the lead to propose a split.'
+        );
+      }
+      const at = nowIso();
+      room.plan.status = 'approved';
+      room.plan.decidedBy = HUMAN_ID;
+      room.plan.decidedAt = at;
+      room.plan.note = note;
+      for (const task of room.tasks) {
+        if (task.status === 'draft') {
+          task.status = 'open';
+          task.updatedAt = at;
+        }
+      }
+      const planTask = room.tasks.find((task) => task.id === PLAN_TASK_ID);
+      if (planTask !== undefined) {
+        planTask.status = 'accepted';
+        planTask.updatedAt = at;
+      }
+      emit({
+        type: 'plan.approved',
+        actor: HUMAN_ID,
+        taskId: null,
+        threadId: null,
+        summary: 'The human approved the plan. Everyone is a peer executing now.',
+        audience: []
+      });
+      return room;
+    });
+  }
+
+  async rejectPlan(note: string): Promise<Room> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      if (room.plan.status !== 'proposed') {
+        throw new MarketError(
+          'INVALID',
+          `The plan is "${room.plan.status}", so there is nothing to reject.`,
+          'Wait for the lead to propose a split.'
+        );
+      }
+      room.plan.status = 'rejected';
+      room.plan.decidedBy = HUMAN_ID;
+      room.plan.decidedAt = nowIso();
+      room.plan.note = note;
+      const planTask = room.tasks.find((task) => task.id === PLAN_TASK_ID);
+      if (planTask !== undefined) {
+        planTask.status = planTask.owner === null ? 'open' : 'claimed';
+        planTask.updatedAt = nowIso();
+      }
+      emit({
+        type: 'plan.rejected',
+        actor: HUMAN_ID,
+        taskId: PLAN_TASK_ID,
+        threadId: null,
+        summary: `The human rejected the plan: ${note}`,
+        audience: []
+      });
+      return room;
+    });
+  }
+
+  async pauseAgent(agentId: string, reason: string): Promise<Agent> {
+    return this.apply((data, emit) => {
+      const agent = this.agentOf(data, agentId);
+      agent.paused = true;
+      agent.pausedReason = reason;
+      emit({
+        type: 'agent.paused',
+        actor: HUMAN_ID,
+        taskId: agent.status.taskId,
+        threadId: null,
+        summary: `The human paused ${agent.displayName}: ${reason}`,
+        audience: [agent.id]
+      });
+      return agent;
+    });
+  }
+
+  async resumeAgent(agentId: string): Promise<Agent> {
+    return this.apply((data, emit) => {
+      const agent = this.agentOf(data, agentId);
+      agent.paused = false;
+      agent.pausedReason = null;
+      emit({
+        type: 'agent.resumed',
+        actor: HUMAN_ID,
+        taskId: agent.status.taskId,
+        threadId: null,
+        summary: `The human resumed ${agent.displayName}.`,
+        audience: [agent.id]
+      });
+      return agent;
+    });
+  }
+
+  async setAgentScope(agentId: string, scope: Partial<AgentScope>): Promise<Agent> {
+    return this.apply((data, emit) => {
+      const agent = this.agentOf(data, agentId);
+      agent.scope = {
+        readPaths: scope.readPaths ?? agent.scope.readPaths,
+        writeTasks: scope.writeTasks ?? agent.scope.writeTasks
+      };
+      emit({
+        type: 'agent.scope',
+        actor: HUMAN_ID,
+        taskId: null,
+        threadId: null,
+        summary: `The human changed ${agent.displayName}'s scope.`,
+        audience: [agent.id]
+      });
+      return agent;
+    });
+  }
+
+  /** Take a task off one agent and give it to another. */
+  async assignTask(taskId: string, agentId: string): Promise<Task> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const task = this.taskOf(room, taskId);
+      const agent = this.agentOf(data, agentId);
+      if (task.status === 'accepted') {
+        throw new MarketError(
+          'INVALID',
+          `"${task.id}" is already accepted.`,
+          'Reopen it first if it needs more work.'
+        );
+      }
+      const previous = task.owner;
+      const at = nowIso();
+      task.owner = agent.id;
+      task.status = 'claimed';
+      task.claimedAt = at;
+      task.blockedReason = null;
+      task.updatedAt = at;
+      emit({
+        type: 'task.assigned',
+        actor: HUMAN_ID,
+        taskId: task.id,
+        threadId: null,
+        summary:
+          previous === null
+            ? `The human gave "${task.id}" to ${agent.displayName}.`
+            : `The human moved "${task.id}" from ${previous} to ${agent.displayName}.`,
+        audience: unique([agent.id, ...(previous !== null ? [previous] : [])])
+      });
+      return task;
+    });
+  }
+
+  async acceptTask(taskId: string): Promise<Task> {
+    return this.apply((data, emit) => {
+      const task = this.taskOf(data.room, taskId);
+      task.status = 'accepted';
+      task.updatedAt = nowIso();
+      emit({
+        type: 'task.accepted',
+        actor: HUMAN_ID,
+        taskId: task.id,
+        threadId: null,
+        summary: `The human accepted "${task.id}".`,
+        audience: task.owner !== null ? [task.owner] : []
+      });
+      return task;
+    });
+  }
+
+  async reopenTask(taskId: string, keepOwner = false): Promise<Task> {
+    return this.apply((data, emit) => {
+      const task = this.taskOf(data.room, taskId);
+      const previous = task.owner;
+      task.status = keepOwner && task.owner !== null ? 'claimed' : 'open';
+      if (!keepOwner) {
+        task.owner = null;
+        task.claimedAt = null;
+      }
+      task.blockedReason = null;
+      task.updatedAt = nowIso();
+      emit({
+        type: 'task.reopened',
+        actor: HUMAN_ID,
+        taskId: task.id,
+        threadId: null,
+        summary: `The human reopened "${task.id}".`,
+        audience: unique([...(previous !== null ? [previous] : []), ...(task.owner !== null ? [task.owner] : [])])
+      });
+      return task;
+    });
+  }
+
+  /** Raise a task's message budget and let it start talking again. */
+  async setTaskBudget(taskId: string, messageBudget: number): Promise<Task> {
+    return this.apply((data, emit) => {
+      const task = this.taskOf(data.room, taskId);
+      if (!Number.isInteger(messageBudget) || messageBudget < 0) {
+        throw new MarketError('INVALID', 'A message budget is a non-negative integer.', 'Pass a whole number.');
+      }
+      task.messageBudget = messageBudget;
+      if (messageBudget > task.messagesUsed) task.budgetHaltedAt = null;
+      task.updatedAt = nowIso();
+      emit({
+        type: 'task.budget',
+        actor: HUMAN_ID,
+        taskId: task.id,
+        threadId: null,
+        summary: `The human set the message budget for "${task.id}" to ${messageBudget}.`,
+        audience: task.owner !== null ? [task.owner] : []
+      });
+      return task;
+    });
+  }
+
+  /** The human answering, or redirecting, inside a thread. Never charged to the budget. */
+  async postAsHuman(input: {
+    taskId: string;
+    to?: string[];
+    threadId?: string;
+    subject?: string;
+    body: string;
+    kind?: MessageKind;
+  }): Promise<PostMessageResult> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const task = this.taskOf(room, input.taskId);
+      const humanAgent: Agent = {
+        id: HUMAN_ID,
+        displayName: 'the human',
+        provider: 'human',
+        role: 'lead',
+        scope: { readPaths: ['**'], writeTasks: ['*'] },
+        paused: false,
+        pausedReason: null,
+        status: { state: 'idle', taskId: null, note: '', updatedAt: nowIso() },
+        joinedAt: room.createdAt,
+        lastSeenAt: nowIso()
+      };
+      const thread = this.resolveThread(room, humanAgent, task, input);
+      const at = nowIso();
+      const message = {
+        id: shortId('msg'),
+        threadId: thread.id,
+        taskId: task.id,
+        from: HUMAN_ID,
+        kind: input.kind ?? 'answer',
+        body: input.body,
+        createdAt: at
+      };
+      thread.messages.push(message);
+      thread.updatedAt = at;
+
+      const delivered = thread.participants.filter((participant) => participant !== HUMAN_ID);
+      emit({
+        type: 'message.posted',
+        actor: HUMAN_ID,
+        taskId: task.id,
+        threadId: thread.id,
+        summary: `The human answered on "${task.id}".`,
+        audience: delivered
+      });
+      return {
+        threadId: thread.id,
+        messageId: message.id,
+        delivered,
+        budgetRemaining: task.messageBudget - task.messagesUsed,
+        message: `Delivered to ${delivered.join(', ')}.`
+      };
+    });
+  }
+
+  async recordDecision(input: { title: string; body: string }): Promise<Decision> {
+    return this.apply((data, emit) => {
+      const decision: Decision = {
+        id: shortId('dec'),
+        kind: 'general',
+        title: input.title,
+        body: input.body,
+        seam: null,
+        proposedBy: HUMAN_ID,
+        createdAt: nowIso(),
+        version: 1
+      };
+      data.room.decisions.push(decision);
+      emit({
+        type: 'decision.recorded',
+        actor: HUMAN_ID,
+        taskId: null,
+        threadId: null,
+        summary: `The human recorded a decision: ${input.title}`,
+        audience: []
+      });
+      return decision;
+    });
+  }
+
+  // ------------------------------------------------------------- internals
+
+  private async apply<T>(fn: (data: MarketData, emit: EmitFn) => T): Promise<T> {
+    const outcome = await this.store.mutate((data) => {
+      const emitted: RoomEvent[] = [];
+      const emit: EmitFn = (partial) => {
+        data.room.eventSeq += 1;
+        const event: RoomEvent = { seq: data.room.eventSeq, at: nowIso(), ...partial };
+        data.room.events.push(event);
+        emitted.push(event);
+      };
+      const value = fn(data, emit);
+      data.room.updatedAt = nowIso();
+      return { value, emitted };
+    });
+    for (const event of outcome.emitted) this.bus.emit(event);
+    return outcome.value;
+  }
+
+  private agentOf(data: MarketData, agentId: string): Agent {
+    const agent = data.room.agents.find((candidate) => candidate.id === agentId);
+    if (agent === undefined) {
+      throw new MarketError(
+        'UNAUTHORIZED',
+        `No agent "${agentId}" in this room.`,
+        'Ask the human for a room token for this agent.'
+      );
+    }
+    return agent;
+  }
+
+  private taskOf(room: Room, taskId: string): Task {
+    const task = room.tasks.find((candidate) => candidate.id === taskId);
+    if (task === undefined) {
+      throw new MarketError(
+        'NOT_FOUND',
+        `No task "${taskId}" on this board.`,
+        `Call read_room for the board. Known tasks: ${room.tasks.map((entry) => entry.id).join(', ')}.`,
+        { known: room.tasks.map((entry) => entry.id) }
+      );
+    }
+    return task;
+  }
+
+  private requireActive(agent: Agent): void {
+    if (agent.paused) {
+      throw new MarketError(
+        'AGENT_PAUSED',
+        `The human paused you${agent.pausedReason !== null ? `: ${agent.pausedReason}` : ''}.`,
+        'Stop working and wait to be resumed. Do not retry.',
+        { pausedReason: agent.pausedReason }
+      );
+    }
+  }
+
+  private touchPresence(agent: Agent, emit: EmitFn): void {
+    const at = nowIso();
+    if (agent.lastSeenAt === null) {
+      emit({
+        type: 'agent.joined',
+        actor: agent.id,
+        taskId: null,
+        threadId: null,
+        summary: `${agent.displayName} (${agent.provider}) joined the room.`,
+        audience: []
+      });
+    }
+    agent.lastSeenAt = at;
+  }
+
+  private touchStatus(
+    agent: Agent,
+    emit: EmitFn,
+    update: { note?: string; state?: AgentStatus['state']; taskId?: string | null }
+  ): void {
+    if (update.note === undefined && update.state === undefined) return;
+    agent.status = {
+      state: update.state ?? agent.status.state,
+      taskId: update.taskId === undefined ? agent.status.taskId : update.taskId,
+      note: update.note ?? agent.status.note,
+      updatedAt: nowIso()
+    };
+    emit({
+      type: 'agent.status',
+      actor: agent.id,
+      taskId: agent.status.taskId,
+      threadId: null,
+      summary: `${agent.displayName} is ${agent.status.state}${agent.status.note !== '' ? `: ${agent.status.note}` : ''}`,
+      audience: [HUMAN_ID]
+    });
+  }
+
+  private haltOnBudget(room: Room, task: Task, emit: EmitFn): void {
+    if (task.budgetHaltedAt !== null) return;
+    task.budgetHaltedAt = nowIso();
+    emit({
+      type: 'budget.exhausted',
+      actor: task.owner ?? HUMAN_ID,
+      taskId: task.id,
+      threadId: null,
+      summary: `"${task.id}" spent its ${task.messageBudget}-message budget and stopped to ask the human.`,
+      audience: unique([HUMAN_ID, ...(task.owner !== null ? [task.owner] : [])])
+    });
+  }
+
+  private resolveThread(
+    room: Room,
+    sender: Agent,
+    task: Task,
+    input: { to?: string[]; threadId?: string; subject?: string }
+  ): Thread {
+    if (input.threadId !== undefined) {
+      const thread = room.threads.find((candidate) => candidate.id === input.threadId);
+      if (thread === undefined || !thread.participants.includes(sender.id)) {
+        throw new MarketError(
+          'NOT_FOUND',
+          `No thread "${input.threadId}" is visible to you.`,
+          'Threads are visible only to the agents in them. Start a new one by naming recipients in "to".'
+        );
+      }
+      if (thread.taskId !== task.id) {
+        throw new MarketError(
+          'INVALID',
+          `Thread "${thread.id}" belongs to task "${thread.taskId}", not "${task.id}".`,
+          'Every message attaches to one task. Use that task_id, or start a new thread.'
+        );
+      }
+      return thread;
+    }
+
+    const recipients = unique(input.to ?? []).filter((id) => id !== sender.id);
+    if (recipients.length === 0) {
+      throw new MarketError(
+        'INVALID',
+        'A new thread needs at least one recipient.',
+        `Pass "to" with agent ids, or "${HUMAN_ID}" to ask the human.`
+      );
+    }
+    for (const recipient of recipients) {
+      if (recipient === HUMAN_ID) continue;
+      if (!room.agents.some((agent) => agent.id === recipient)) {
+        throw new MarketError(
+          'NOT_FOUND',
+          `No agent "${recipient}" in this room.`,
+          `Known agents: ${room.agents.map((agent) => agent.id).join(', ')}.`,
+          { known: room.agents.map((agent) => agent.id) }
+        );
+      }
+    }
+
+    const participants = unique([sender.id, ...recipients]).sort();
+    const existing = room.threads.find(
+      (thread) => thread.taskId === task.id && sameParticipants(thread.participants, participants)
+    );
+    if (existing !== undefined) return existing;
+
+    const at = nowIso();
+    const thread: Thread = {
+      id: shortId('thr'),
+      taskId: task.id,
+      subject: input.subject ?? task.title,
+      participants,
+      createdAt: at,
+      updatedAt: at,
+      messages: []
+    };
+    room.threads.push(thread);
+    return thread;
+  }
+
+  private seamPartnerAgents(room: Room, task: Task): string[] {
+    const partners: string[] = [];
+    for (const seamId of task.seams) {
+      const decision = room.decisions.find((candidate) => candidate.id === seamId);
+      if (decision?.seam === undefined || decision.seam === null) continue;
+      for (const other of decision.seam.betweenTasks) {
+        if (other === task.id) continue;
+        const partner = room.tasks.find((candidate) => candidate.id === other);
+        if (partner?.owner != null) partners.push(partner.owner);
+      }
+    }
+    return unique(partners);
+  }
+
+  private uniqueTaskId(room: Room, base: string): string {
+    const taken = new Set(room.tasks.map((task) => task.id));
+    if (base !== PLAN_TASK_ID && !taken.has(base)) return base;
+    let index = 2;
+    while (taken.has(`${base}-${index}`)) index += 1;
+    return `${base}-${index}`;
+  }
+}
+
+export type { AgentRoomView, SupervisorRoomView };
+export { DEFAULT_MESSAGE_BUDGET, HUMAN_ID, PLAN_TASK_ID };
