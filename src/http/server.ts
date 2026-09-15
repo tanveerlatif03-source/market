@@ -6,15 +6,26 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createAgentMcpServer } from '../mcp/server.ts';
 import type { AgentMcpServer } from '../mcp/server.ts';
 import type { RoomService } from '../room/service.ts';
+import { OWNER_ID } from '../room/seed.ts';
+import type { ProviderConfig } from '../broker/broker.ts';
+import { handleBrokerRequest } from './broker.ts';
 import { dashboardHtml } from './dashboard.ts';
 import { handleSupervisorRequest } from './supervisor.ts';
 import { bearerToken, queryToken, readJsonBody, sendError, sendJson } from './util.ts';
 
-export interface MarketServerOptions {
+export interface AgoraServerOptions {
   host?: string;
   port?: number;
   /** Host header values accepted when DNS rebinding protection is on. */
   allowedHosts?: string[];
+  /**
+   * Providers this room will broker calls to (Q15). Empty is the normal case:
+   * an agent on a subscription has its own billing and routing it through here
+   * would bill the work twice.
+   */
+  brokers?: readonly ProviderConfig[];
+  /** Injected in tests. */
+  fetchImpl?: typeof fetch;
 }
 
 interface McpSession {
@@ -23,7 +34,7 @@ interface McpSession {
   agentId: string;
 }
 
-export interface MarketServer {
+export interface AgoraServer {
   server: Server;
   listen: () => Promise<{ host: string; port: number }>;
   close: () => Promise<void>;
@@ -33,7 +44,7 @@ export interface MarketServer {
  * One endpoint each: agents speak MCP at /mcp with their room token, the human
  * watches and steers at /api and /.
  */
-export function createMarketServer(service: RoomService, options: MarketServerOptions = {}): MarketServer {
+export function createAgoraServer(service: RoomService, options: AgoraServerOptions = {}): AgoraServer {
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 8787;
   const sessions = new Map<string, McpSession>();
@@ -41,11 +52,11 @@ export function createMarketServer(service: RoomService, options: MarketServerOp
   async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const principal = service.authenticate(bearerToken(req));
     if (principal === null || principal.kind !== 'agent' || principal.agentId === null) {
-      res.setHeader('www-authenticate', 'Bearer realm="market"');
+      res.setHeader('www-authenticate', 'Bearer realm="agora"');
       sendJson(res, 401, {
         error: {
           code: 'UNAUTHORIZED',
-          message: 'This endpoint needs a Market room token.',
+          message: 'This endpoint needs a Agora room token.',
           remedy: 'Ask the human for the token for this agent and set it as a Bearer header.'
         }
       });
@@ -129,12 +140,45 @@ export function createMarketServer(service: RoomService, options: MarketServerOp
         error: {
           code: 'UNAUTHORIZED',
           message: 'This endpoint needs the supervisor token.',
-          remedy: 'Run `market token supervisor` to mint one.'
+          remedy: 'Run `agora token supervisor` to mint one.'
         }
       });
       return;
     }
-    const handled = await handleSupervisorRequest(service, req, res, url);
+    const handled = await handleSupervisorRequest(
+      service,
+      principal.humanId ?? OWNER_ID,
+      req,
+      res,
+      url
+    );
+    if (!handled) {
+      sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `No route ${req.method} ${url.pathname}.` } });
+    }
+  }
+
+  /** Agents call this with their own room token; Agora supplies the provider key. */
+  async function handleBroker(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const principal = service.authenticate(bearerToken(req));
+    if (principal === null || principal.kind !== 'agent' || principal.agentId === null) {
+      res.setHeader('www-authenticate', 'Bearer realm="agora"');
+      sendJson(res, 401, {
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'The broker needs your Agora room token, not a provider key.',
+          remedy: 'Send the same Bearer token you use for /mcp.'
+        }
+      });
+      return;
+    }
+    const handled = await handleBrokerRequest(
+      service,
+      principal.agentId,
+      { providers: options.brokers ?? [], ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}) },
+      req,
+      res,
+      url
+    );
     if (!handled) {
       sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `No route ${req.method} ${url.pathname}.` } });
     }
@@ -150,6 +194,10 @@ export function createMarketServer(service: RoomService, options: MarketServerOp
       }
       if (url.pathname === '/mcp') {
         await handleMcp(req, res);
+        return;
+      }
+      if (url.pathname.startsWith('/broker/')) {
+        await handleBroker(req, res, url);
         return;
       }
       if (url.pathname.startsWith('/api/')) {

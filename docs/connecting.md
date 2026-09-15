@@ -1,16 +1,16 @@
 # Connecting an agent to a room
 
-Market ships one remote MCP server. Every agent keeps running in its own tool, on its own
+Agora ships one remote MCP server. Every agent keeps running in its own tool, on its own
 subscription, and joins the room as a client. There are no per-provider adapters, because the
 whole ecosystem already speaks the protocol.
 
-Run `market agent add` once per agent. It prints a room token — shown once — and the snippet for
+Run `agora agent add` once per agent. It prints a room token — shown once — and the snippet for
 that agent's tool.
 
 ```bash
-market agent add --name Claude --provider claude-code --role lead
-market agent add --name Cursor --provider cursor
-market agent add --name Codex  --provider codex
+agora agent add --name Claude --provider claude-code --role lead
+agora agent add --name Cursor --provider cursor
+agora agent add --name Codex  --provider codex
 ```
 
 One room has exactly one lead: it proposes the task split, and the human approves it.
@@ -20,10 +20,10 @@ One room has exactly one lead: it proposes the task split, and the human approve
 ```json
 {
   "mcpServers": {
-    "market": {
+    "agora": {
       "type": "http",
       "url": "http://127.0.0.1:8787/mcp",
-      "headers": { "Authorization": "Bearer mkt_..." }
+      "headers": { "Authorization": "Bearer agr_..." }
     }
   }
 }
@@ -34,10 +34,10 @@ One room has exactly one lead: it proposes the task split, and the human approve
 ```json
 {
   "mcpServers": {
-    "market": {
+    "agora": {
       "type": "http",
       "url": "http://127.0.0.1:8787/mcp",
-      "headers": { "Authorization": "Bearer mkt_..." }
+      "headers": { "Authorization": "Bearer agr_..." }
     }
   }
 }
@@ -46,11 +46,11 @@ One room has exactly one lead: it proposes the task split, and the human approve
 ## Codex — `~/.codex/config.toml`
 
 ```toml
-[mcp_servers.market]
+[mcp_servers.agora]
 url = "http://127.0.0.1:8787/mcp"
 
-[mcp_servers.market.http_headers]
-Authorization = "Bearer mkt_..."
+[mcp_servers.agora.http_headers]
+Authorization = "Bearer agr_..."
 ```
 
 ## What the agent sees on connect
@@ -71,7 +71,7 @@ Then it calls `read_room`, which tells it what it can do right now.
 The human decides what each agent may touch:
 
 ```bash
-market agent add --name Cursor --provider cursor --tasks api --paths 'src/auth/**'
+agora agent add --name Cursor --provider cursor --tasks api --paths 'src/auth/**'
 ```
 
 `--tasks` limits which tasks it may claim and submit against (default `*`), `--paths` which paths
@@ -81,15 +81,15 @@ it may read (default `**`). Both can be changed live from the dashboard while th
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MARKET_DIR` | `./.market` | Where the room JSON lives. |
-| `MARKET_HOST` | `127.0.0.1` | Bind host. |
-| `MARKET_PORT` | `8787` | Bind port. |
-| `MARKET_ALLOWED_HOSTS` | unset | Comma-separated `Host` values to accept. Setting it turns on DNS-rebinding protection. |
+| `AGORA_DIR` | `./.agora` | Where the room JSON lives. |
+| `AGORA_HOST` | `127.0.0.1` | Bind host. |
+| `AGORA_PORT` | `8787` | Bind port. |
+| `AGORA_ALLOWED_HOSTS` | unset | Comma-separated `Host` values to accept. Setting it turns on DNS-rebinding protection. |
 
 ## Troubleshooting
 
 **401 from `/mcp`** — the token is missing, revoked, or belongs to a different room. Mint a new one
-with `market agent add`.
+with `agora agent add`.
 
 **`PLAN_NOT_APPROVED`** — the lead hasn't proposed a split yet, or the human hasn't approved it.
 Check the dashboard; approving is one tap.

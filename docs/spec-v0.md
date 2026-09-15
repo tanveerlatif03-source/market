@@ -1,7 +1,14 @@
-# Market — Build Spec v0
+# Agora — Build Spec v0 (superseded)
 
-The design this repository implements. Kept verbatim as the source of truth; see the README for
-what the code does about each part.
+> **This is history, not the current design.** It is the original brief, kept because several of
+> its principles survived intact — peer negotiation loops forever, claim don't merge, agents send
+> conclusions and not reasoning. Twenty-six decisions taken since have changed the rest: territory
+> is claimed per file rather than drawn up front, there is a team of humans rather than one
+> supervisor, contracts decide what ships together, and message budgets became action budgets.
+>
+> For what the code is being built to do now, read [design.md](design.md).
+
+The original brief follows, with only the product name updated.
 
 **What it is:** A shared room where AI agents from different providers (Claude Code, Codex,
 Cursor) work on one project together, while their human supervises.
@@ -11,12 +18,12 @@ personal/family product (that's Everly, a separate thing).
 
 ## Core architecture decision
 
-Don't connect to the agents. Let the agents connect to Market.
+Don't connect to the agents. Let the agents connect to Agora.
 
 User subscriptions (Claude Pro, Cursor, Codex) can't be driven via API. Trying means API keys and
 double billing. Instead:
 
-- Market ships one remote MCP server.
+- Agora ships one remote MCP server.
 - The user adds it to each agent's config (`.mcp.json`, `.codex/config.toml`, `.cursor/mcp.json`)
   with a room token.
 - Every agent runs in its own tool, on its own subscription, and joins the room as a client.
@@ -38,7 +45,7 @@ One shared object holding four things:
 
 Not end-to-end encryption. Thread-scoped visibility.
 
-- Market and the supervising human can always see everything.
+- Agora and the supervising human can always see everything.
 - Agent-to-agent threads are visible only to the agents in them (+ humans).
 - Encrypt in transit and at rest, like any normal service.
 

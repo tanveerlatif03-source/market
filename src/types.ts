@@ -1,5 +1,44 @@
+import type { Claim } from './room/claims.ts';
+import type { AttentionItem } from './room/attention.ts';
+import type { StuckProbe } from './room/spin.ts';
+import type { Review, RiskRule, RiskSignOff } from './room/review.ts';
+import type { CostEntry } from './room/cost.ts';
+import type { RoomRepo, PartialLanding } from './room/repos.ts';
+import type { Batch } from './room/grid.ts';
+
+export type { Claim, ClaimState, ClaimHolderActivity } from './room/claims.ts';
+export type { AttentionItem, AttentionKind, AttentionOption, AttentionQueue } from './room/attention.ts';
+export type { SpinSignal, StuckProbe, StuckVerdict } from './room/spin.ts';
+export type {
+  Review,
+  ReviewVerdict,
+  ReviewState,
+  ReviewRequirement,
+  RiskRule,
+  RiskSignOff
+} from './room/review.ts';
+export type { Provenance, ProvenanceEntry, ProvenanceSubject } from './room/provenance.ts';
+export type { CostEntry, CostProvenance, CostReport } from './room/cost.ts';
+export type { RoomAction, RightsVerdict } from './room/rights.ts';
+export type { LedgerRow, LedgerColumn, LedgerSort } from './room/ledger.ts';
+export type { CloseReadiness, RoomArchive, SeedContract } from './room/close.ts';
+export type {
+  RoomRepo,
+  PartialLanding,
+  LandingStep,
+  LandingPlan
+} from './room/repos.ts';
+export type {
+  Batch,
+  BatchRow,
+  BatchProgress,
+  RowState,
+  Finding,
+  SweepVerdict
+} from './room/grid.ts';
+
 /**
- * Market domain types.
+ * Agora domain types.
  *
  * The room is one shared object holding four things: a goal, decisions (the
  * agreed plan, task ownership, and the seams), a task board where every task
@@ -40,6 +79,25 @@ export interface Agent {
   status: AgentStatus;
   joinedAt: string;
   lastSeenAt: string | null;
+  /** Last time this agent claimed any file. Distinguishes "moved on" from "thinking". */
+  latestTouchAt: string | null;
+}
+
+/**
+ * A person in the room (Q7). Several, not one — work that runs for days pulls
+ * in many people, and a single-supervisor cockpit is only half the thing.
+ */
+export interface Human {
+  id: string;
+  displayName: string;
+  /**
+   * Mirrors the repository (Q16). Whoever can merge to main can approve a plan,
+   * settle a contract or raise a cap. Everyone else can still pause, redirect
+   * and answer — anything reversible.
+   */
+  canMerge: boolean;
+  joinedAt: string;
+  lastSeenAt: string | null;
 }
 
 export type PlanStatus = 'none' | 'proposed' | 'approved' | 'rejected';
@@ -71,6 +129,13 @@ export interface SeamSide {
 export interface Seam {
   betweenTasks: [string, string];
   contract: SeamSide[];
+  /**
+   * Which side has to be in place first (Q17). A cross-repo contract cannot
+   * land atomically, so the one thing on offer is the order — the side the
+   * other would be broken without goes first. Null only when both sides live
+   * in the same repository, where they land as one merge set.
+   */
+  landFirst: string | null;
 }
 
 /** Room-wide and visible to everyone, including agents that join late. */
@@ -86,6 +151,16 @@ export interface Decision {
   version: number;
 }
 
+/** The one check that asks whether the work was any good, rather than legal. */
+export interface Evidence {
+  /** Stated in the plan, before any code is written. */
+  statement: string;
+  produced: boolean;
+  /** How it was shown. Filled in when produced. */
+  note: string;
+  producedAt: string | null;
+}
+
 export type TaskStatus = 'draft' | 'open' | 'claimed' | 'submitted' | 'accepted' | 'blocked';
 
 export type SubmissionOutcome = 'complete' | 'blocked' | 'needs-review';
@@ -94,6 +169,11 @@ export interface SeamCheck {
   decisionId: string;
   satisfied: boolean;
   note: string;
+  /**
+   * The contract version this was signed against (Q14). A later bump makes the
+   * signature worthless, which is what takes the lane stale.
+   */
+  signedVersion: number;
 }
 
 export interface Submission {
@@ -116,13 +196,22 @@ export interface Task {
   /** Who the lead proposed for this lane. Advisory: ownership still has to be claimed. */
   suggestedOwner: string | null;
   status: TaskStatus;
+  /** Which repository this lane's paths live in (Q17). Null in a one-repo room. */
+  repoId: string | null;
   /** This task's lane: the paths it owns. */
   paths: string[];
   /** Ids of the seam decisions this task must build toward. */
   seams: string[];
-  /** Agents don't get bored, so every task has a message budget. */
-  messageBudget: number;
-  messagesUsed: number;
+  /** The named human answering for this lane (Q8). */
+  laneOwner: string | null;
+  /**
+   * What this lane said would prove it worked (Q18). Null when there is
+   * nothing to prove — a solo lane may still declare one.
+   */
+  evidence: Evidence | null;
+  /** Agents don't get bored, so every lane has an action budget (Q15). */
+  actionBudget: number;
+  actionsUsed: number;
   /** Set when the budget ran out and the task stopped to ask the human. */
   budgetHaltedAt: string | null;
   blockedReason: string | null;
@@ -147,7 +236,7 @@ export interface Message {
 
 /**
  * Thread-scoped visibility: a thread is visible to its participants and to the
- * human. Not end-to-end encryption — Market can always read it.
+ * human. Not end-to-end encryption — Agora can always read it.
  */
 export interface Thread {
   id: string;
@@ -157,6 +246,18 @@ export interface Thread {
   createdAt: string;
   updatedAt: string;
   messages: Message[];
+}
+
+/** Complying and objecting at the same time (Q22). */
+export interface Dissent {
+  id: string;
+  by: string;
+  /** What was ruled, as the agent understood it. */
+  about: string;
+  /** Why the agent thinks it is wrong. */
+  because: string;
+  laneId: string | null;
+  at: string;
 }
 
 export type RoomEventType =
@@ -179,7 +280,41 @@ export type RoomEventType =
   | 'task.blocked'
   | 'task.budget'
   | 'message.posted'
-  | 'budget.exhausted';
+  | 'budget.exhausted'
+  | 'claim.granted'
+  | 'claim.taken'
+  | 'claim.released'
+  | 'claim.collision'
+  | 'claim.swept'
+  | 'evidence.produced'
+  | 'seam.amended'
+  | 'plan.edited'
+  | 'human.joined'
+  | 'attention.raised'
+  | 'attention.answered'
+  | 'attention.opened'
+  | 'dissent.recorded'
+  | 'spin.detected'
+  | 'spin.stuck'
+  | 'review.recorded'
+  | 'review.requested'
+  | 'risk.flagged'
+  | 'risk.signed'
+  | 'lane.landed'
+  | 'cost.reported'
+  | 'cost.metered'
+  | 'batch.opened'
+  | 'batch.rows.taken'
+  | 'batch.row.finished'
+  | 'batch.finished'
+  | 'repo.added'
+  | 'landing.started'
+  | 'landing.partial'
+  | 'landing.recovered'
+  | 'landing.rolledback'
+  | 'room.closed'
+  | 'room.seeded'
+  | 'rights.refused';
 
 export interface RoomEvent {
   seq: number;
@@ -194,12 +329,30 @@ export interface RoomEvent {
   audience: string[];
 }
 
+/**
+ * `red` is Q17's half-landed state: one repo has the change and another does
+ * not. The room stays open and red until both halves are in, because the one
+ * thing worse than a slow cross-repo landing is a quiet one.
+ */
+export type RoomStatus = 'open' | 'red' | 'closed';
+
 export interface Room {
   id: string;
   name: string;
   goal: string;
   createdAt: string;
   updatedAt: string;
+  /** A room is a unit of work that ends (Q17, Q24). */
+  status: RoomStatus;
+  closedAt: string | null;
+  closedBy: string | null;
+  closeNote: string | null;
+  /** The archive whose contracts this room started from, if any (Q24). */
+  seededFrom: string | null;
+  /** The repositories this room touches (Q17). One is the common case. */
+  repos: RoomRepo[];
+  /** Set when a landing got half in. The room is red until this clears (Q17). */
+  partialLanding: PartialLanding | null;
   /** One agent is lead for the room: it proposes the split, the human approves. */
   lead: string | null;
   plan: Plan;
@@ -207,6 +360,26 @@ export interface Room {
   agents: Agent[];
   decisions: Decision[];
   tasks: Task[];
+  /** Per-file claims (Q2-Q5). One claim per path, room-wide. */
+  claims: Claim[];
+  /** The people in the room (Q7). */
+  humans: Human[];
+  /** Everything waiting on a person (Q8, Q11). */
+  attention: AttentionItem[];
+  /** Rounds of the "what is missing" question, per lane (Q20). */
+  probes: Record<string, StuckProbe[]>;
+  /** Objections agents registered while complying (Q22). */
+  dissents: Dissent[];
+  /** Readings of one lane by the agent across its contract (Q13). */
+  reviews: Review[];
+  /** Surfaces that always pull a person in, whatever the agents say (Q13). */
+  riskList: RiskRule[];
+  /** People having looked at those surfaces, per submission (Q13). */
+  signOffs: RiskSignOff[];
+  /** What the work cost, each figure carrying where it came from (Q15). */
+  costs: CostEntry[];
+  /** Repetitive work: one instruction, many subjects, one row each (Q19). */
+  batches: Batch[];
   threads: Thread[];
   events: RoomEvent[];
   eventSeq: number;
@@ -217,6 +390,8 @@ export interface TokenRecord {
   id: string;
   kind: 'agent' | 'supervisor';
   agentId: string | null;
+  /** For a supervisor token: which person it acts as (Q16). */
+  humanId?: string | null;
   label: string;
   /** sha256 of the token. The token itself is shown once, at creation. */
   hash: string;
@@ -224,7 +399,7 @@ export interface TokenRecord {
   revokedAt: string | null;
 }
 
-export interface MarketData {
+export interface AgoraData {
   version: 1;
   room: Room;
   tokens: TokenRecord[];

@@ -1,22 +1,22 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { isMarketError } from '../errors.ts';
+import { isAgoraError } from '../errors.ts';
 import { HUMAN_ID, PLAN_TASK_ID } from '../room/seed.ts';
 import type { RoomService } from '../room/service.ts';
 import type { RoomEvent } from '../types.ts';
 
-const SERVER_NAME = 'market';
+const SERVER_NAME = 'agora';
 const SERVER_VERSION = '0.1.0';
-const ROOM_RESOURCE_URI = 'market://room';
+const ROOM_RESOURCE_URI = 'agora://room';
 
 /**
  * What every agent is told the moment it joins, whichever tool it is running in.
- * Market does not translate between agents; it gives them one room and one set
+ * Agora does not translate between agents; it gives them one room and one set
  * of rules.
  */
 function instructionsFor(roomName: string, goal: string): string {
   return [
-    `You are in the Market room "${roomName}", working alongside agents from other tools.`,
+    `You are in the Agora room "${roomName}", working alongside agents from other tools.`,
     `The goal: ${goal}`,
     '',
     'How the room works:',
@@ -24,6 +24,12 @@ function instructionsFor(roomName: string, goal: string): string {
     '- A task has exactly one owner. Claim, do not merge. Never edit files outside the lane of a task you own — ask the owner in a thread instead.',
     '- The seam — exactly where two pieces touch, what each side provides and expects — is agreed before work starts and stored as a room decision. Build toward it.',
     '- Every message attaches to a task and spends that task\'s message budget. When the budget runs out the task stops and the human is asked.',
+    '- Claim every file with claim_file before you write to it, and release it when you are done. Re-claiming a file you hold is how you say you are still on it; holding one you have finished with only blocks someone else.',
+    '- If you think a ruling is wrong, use dissent — comply and object at the same time. It stops nothing and costs nothing.',
+    '- When a lane across one of your contracts submits, you are asked to read it. Use review_lane. Nothing on either side lands until you do, so it is not optional and not a courtesy.',
+    '- Use why_is_this to find out what decided a file, a lane or a contract before you argue with it.',
+    '- Repetitive work — the same check across many files — is a sweep, not forty messages. open_sweep once, then anyone can take_rows and work them in parallel. A row always gets a finding, even when the answer is "nothing to do".',
+    '- If your tool knows what your work has cost — tokens, requests, or how much of your plan is gone — say so with report_usage. Nothing is converted into money and nothing is added up; a quota running low is the one that actually stops the work.',
     '- Send only the ask and the answer. Your reasoning and live status go to the human through status_note on any tool call, never to another agent.',
     '- Threads are visible to their participants and to the human. Decisions are visible to everyone, including agents that join later.',
     '',
@@ -36,7 +42,7 @@ function ok(payload: unknown) {
 }
 
 function fail(error: unknown) {
-  const payload = isMarketError(error)
+  const payload = isAgoraError(error)
     ? { error: { code: error.code, message: error.message, remedy: error.remedy, details: error.details } }
     : { error: { code: 'INTERNAL', message: error instanceof Error ? error.message : String(error), remedy: 'Report this to the human.' } };
   return { ...ok(payload), isError: true };
@@ -88,7 +94,15 @@ const planSchema = z.object({
         description: z.string().optional(),
         paths: z.array(z.string()).describe('The files this task owns. No two tasks may own the same file.'),
         suggestedOwner: z.string().optional().describe('Which agent should take this lane.'),
-        messageBudget: z.number().int().positive().optional()
+        actionBudget: z.number().int().positive().optional(),
+        evidence: z
+          .string()
+          .optional()
+          .describe(
+            'What would demonstrate this lane worked. Not "tests pass" — a real demonstration: ' +
+              'the flow completing under three minutes, the quote for a known cart matching a ' +
+              'known number. Nothing lands until it is produced.'
+          )
       })
     )
     .min(1),
@@ -243,6 +257,312 @@ export function createAgentMcpServer(service: RoomService, agentId: string): Age
           filesChanged: args.files_changed,
           seamChecks: args.seam_checks,
           plan: args.plan,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'claim_file',
+    {
+      title: 'Claim a file',
+      description:
+        'Take a file before you write to it. Answers immediately. Claiming a file you already ' +
+        'hold is how you say you are still working on it — do that rather than holding silently. ' +
+        'If someone who had moved on was holding it, it comes to you and they are told.',
+      inputSchema: {
+        path: z.string().describe('Repository-relative path of the file you are about to edit.'),
+        lane: z.string().describe('The task this edit is for.'),
+        status_note: statusNote
+      },
+      annotations: { idempotentHint: true, openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.claimFile(agentId, {
+          path: args.path,
+          laneId: args.lane,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'release_file',
+    {
+      title: 'Release files',
+      description:
+        'Hand files back when you are done with them. Always safe and always cheap — holding a ' +
+        'file you have finished with only blocks someone else.',
+      inputSchema: {
+        paths: z.array(z.string()).min(1).describe('Paths you are finished with.'),
+        status_note: statusNote
+      },
+      annotations: { idempotentHint: true, openWorldHint: false }
+    },
+    async (args) =>
+      guard(() => service.releaseFile(agentId, { paths: args.paths, statusNote: args.status_note }))
+  );
+
+  server.registerTool(
+    'show_evidence',
+    {
+      title: 'Show your work',
+      description:
+        'Record what demonstrates your lane actually worked — the thing it promised in the plan. ' +
+        'Nothing lands until this is here, so do it before you expect to merge.',
+      inputSchema: {
+        task_id: z.string(),
+        note: z
+          .string()
+          .min(1)
+          .describe('How it was shown. Point at the run, the recording, the number that matched.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.produceEvidence(agentId, {
+          taskId: args.task_id,
+          note: args.note,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'dissent',
+    {
+      title: 'Object, on the record',
+      description:
+        'Register that you think a ruling is wrong, while still complying with it. This does not ' +
+        'refuse anything and does not stop your work — it puts your objection in front of the ' +
+        'humans so a bad call gets caught before its cost lands. Cheap on purpose.',
+      inputSchema: {
+        about: z.string().min(1).describe('The ruling you are objecting to, as you understood it.'),
+        because: z.string().min(1).describe('Why you think it is wrong. Concretely.'),
+        lane: z.string().optional(),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.recordDissent(agentId, {
+          about: args.about,
+          because: args.because,
+          laneId: args.lane
+        })
+      )
+  );
+
+  server.registerTool(
+    'report_missing',
+    {
+      title: 'Say what you are missing',
+      description:
+        'Answer the question Agora asks when a lane has been rewriting the same file without ' +
+        'showing anything. Name the one thing you are missing. Saying you are stuck costs you ' +
+        'nothing and is always cheaper than another rewrite.',
+      inputSchema: {
+        lane: z.string(),
+        missing: z.string().min(1).describe('The one thing standing between you and the evidence.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() => service.answerProbe(agentId, { laneId: args.lane, missing: args.missing }))
+  );
+
+  server.registerTool(
+    'review_lane',
+    {
+      title: 'Review the lane across your contract',
+      description:
+        'Read the work on the other side of a contract you share and say whether it holds. You ' +
+        'are asked to do this because you have the context and a stake in the answer — nothing ' +
+        'on either side of the contract lands until you have. Say it breaks and a person rules ' +
+        'on it; say nothing and both lanes sit there.',
+      inputSchema: {
+        lane: z.string().describe('The lane you read. It is across a contract from one of yours.'),
+        verdict: z
+          .enum(['holds', 'breaks'])
+          .describe('Whether their side does what the contract says it does.'),
+        note: z
+          .string()
+          .min(1)
+          .describe('What you checked, concretely. On "breaks", exactly what does not match.'),
+        seam: z.string().optional().describe('Which contract, when you share more than one.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.reviewLane(agentId, {
+          laneId: args.lane,
+          verdict: args.verdict,
+          note: args.note,
+          seamId: args.seam,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'why_is_this',
+    {
+      title: 'Why is this the way it is',
+      description:
+        'Ask what decided a file, a lane or a contract: the plan that created it, the contracts ' +
+        'it was built toward, every amendment, who ruled on what, and every objection on the ' +
+        'record. Read this before you argue with something — it is usually the answer.',
+      inputSchema: {
+        file: z.string().optional().describe('A path. What shaped this file.'),
+        lane: z.string().optional().describe('A task id. What shaped this lane.'),
+        contract: z.string().optional().describe('A seam decision id. How this contract got here.'),
+        status_note: statusNote
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async (args) =>
+      guard(async () => {
+        if (args.file !== undefined) return service.provenance({ kind: 'file', path: args.file });
+        if (args.lane !== undefined) return service.provenance({ kind: 'lane', laneId: args.lane });
+        if (args.contract !== undefined) {
+          return service.provenance({ kind: 'contract', seamId: args.contract });
+        }
+        return { reviewsDue: service.reviewsDue(agentId) };
+      })
+  );
+
+  server.registerTool(
+    'report_usage',
+    {
+      title: 'Say what this cost',
+      description:
+        'Report what your work has used, when your tool actually knows. Token counts, request ' +
+        'counts, or how much of your plan\u2019s quota is gone. Agora never converts these into ' +
+        'money or adds them together, because they are three different kinds of fact — it keeps ' +
+        'each one labelled with where it came from. Reporting a quota that is nearly gone gets a ' +
+        'person involved before it runs out mid-lane rather than after.',
+      inputSchema: {
+        provenance: z
+          .enum(['metered', 'reported', 'quota'])
+          .describe(
+            'reported = your own count. quota = how much of your plan is used. ' +
+              'metered = only when Agora brokered the call itself.'
+          ),
+        amount: z.number().min(0).describe('What you counted.'),
+        unit: z.string().min(1).describe('"tokens", "requests", "usd-cents" — what you counted in.'),
+        limit: z.number().min(0).optional().describe('Required for a quota: the ceiling.'),
+        lane: z.string().optional().describe('The lane this was spent on.'),
+        note: z.string().optional(),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.recordCost(agentId, {
+          provenance: args.provenance,
+          amount: args.amount,
+          unit: args.unit,
+          limit: args.limit,
+          laneId: args.lane,
+          note: args.note
+        })
+      )
+  );
+
+  server.registerTool(
+    'open_sweep',
+    {
+      title: 'Open a sweep: one instruction, many files',
+      description:
+        'For repetitive work — the same check across forty files. You give the instruction once ' +
+        'and the paths it applies to; Agora makes one row per file. Other agents can then take ' +
+        'rows and work them at the same time as you, without anyone asking anyone for a turn. ' +
+        'Agora never reads or interprets the instruction; it hands it to whoever takes a row.',
+      inputSchema: {
+        lane: z.string().describe('The lane this sweep belongs to. You have to own it.'),
+        title: z.string().min(1).describe('What the sweep is, in a few words.'),
+        instruction: z
+          .string()
+          .min(1)
+          .describe('What to do to each file. Written for another agent to read, not for Agora.'),
+        paths: z.array(z.string()).min(1).describe('One row per path. All inside your lane.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.openBatch(agentId, {
+          laneId: args.lane,
+          title: args.title,
+          instruction: args.instruction,
+          subjects: args.paths,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'take_rows',
+    {
+      title: 'Take rows off a sweep',
+      description:
+        'Ask for work from a sweep and Agora hands you some. You do not negotiate with the other ' +
+        'agents working it and you never will — that is the point. Claim each file with ' +
+        'claim_file before you write to it, then answer for each row with finish_row.',
+      inputSchema: {
+        sweep: z.string().describe('The sweep id, from read_room.'),
+        count: z.number().int().min(1).max(50).optional().describe('How many rows. Default 1.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.takeRows(agentId, {
+          batchId: args.sweep,
+          count: args.count,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'finish_row',
+    {
+      title: 'Answer for one row',
+      description:
+        'Say what happened to one file: you changed it, you looked and deliberately left it ' +
+        'alone, or you are stuck. A finding is required either way — "nothing to do" on forty ' +
+        'rows is itself the answer to something, and Agora will say so. If several rows are ' +
+        'stuck on the same thing, a person is asked once, not once per row.',
+      inputSchema: {
+        row: z.string(),
+        outcome: z
+          .enum(['done', 'skipped', 'stuck'])
+          .describe('done = changed it. skipped = looked, left it alone. stuck = could not.'),
+        finding: z
+          .string()
+          .min(1)
+          .describe('What you did, or why there was nothing to do, or what stopped you.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.finishRow(agentId, {
+          rowId: args.row,
+          outcome: args.outcome,
+          finding: args.finding,
           statusNote: args.status_note
         })
       )

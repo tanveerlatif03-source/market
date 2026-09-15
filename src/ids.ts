@@ -16,7 +16,7 @@ export function slugify(input: string, fallback = 'task'): string {
 }
 
 export function newToken(): string {
-  return `mkt_${randomBytes(24).toString('base64url')}`;
+  return `agr_${randomBytes(24).toString('base64url')}`;
 }
 
 export function hashToken(token: string): string {

@@ -4,15 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { EventBus } from '../src/events.ts';
-import { MarketStore } from '../src/store/store.ts';
+import { AgoraStore } from '../src/store/store.ts';
 import { RoomService } from '../src/room/service.ts';
-import { createMarketData } from '../src/room/seed.ts';
+import { createAgoraData, OWNER_ID } from '../src/room/seed.ts';
 import { AUTH_PAGE_PLAN } from './helpers.ts';
 
 const temporary: string[] = [];
 
 async function scratchFile(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'market-'));
+  const dir = await mkdtemp(join(tmpdir(), 'agora-'));
   temporary.push(dir);
   return join(dir, 'room.json');
 }
@@ -26,12 +26,12 @@ describe('the room on disk', () => {
     const file = await scratchFile();
     const open = async (): Promise<RoomService> =>
       new RoomService(
-        await MarketStore.open(file, () => createMarketData({ name: 'Auth page', goal: 'Ship a working auth page.' })),
+        await AgoraStore.open(file, () => createAgoraData({ name: 'Auth page', goal: 'Ship a working auth page.' })),
         new EventBus()
       );
 
     const first = await open();
-    const lead = await first.addAgent({
+    const lead = await first.addAgent(OWNER_ID, {
       id: 'claude',
       displayName: 'Claude',
       provider: 'claude-code',
@@ -44,7 +44,7 @@ describe('the room on disk', () => {
       outcome: 'needs-review',
       plan: AUTH_PAGE_PLAN
     });
-    await first.approvePlan();
+    await first.approvePlan(OWNER_ID);
 
     const second = await open();
     const room = second.snapshot();
@@ -58,11 +58,11 @@ describe('the room on disk', () => {
   it('never writes a token in the clear', async () => {
     const file = await scratchFile();
     const service = new RoomService(
-      await MarketStore.open(file, () => createMarketData({ name: 'Room', goal: 'Goal.' })),
+      await AgoraStore.open(file, () => createAgoraData({ name: 'Room', goal: 'Goal.' })),
       new EventBus()
     );
-    const { token } = await service.addAgent({ displayName: 'Claude', provider: 'claude-code', role: 'lead' });
-    const supervisorToken = await service.createSupervisorToken('human');
+    const { token } = await service.addAgent(OWNER_ID, { displayName: 'Claude', provider: 'claude-code', role: 'lead' });
+    const supervisorToken = await service.createSupervisorToken(OWNER_ID, 'human');
 
     const written = await readFile(file, 'utf8');
     assert.ok(!written.includes(token));
@@ -70,7 +70,7 @@ describe('the room on disk', () => {
   });
 
   it('leaves the room untouched when a mutation is refused', async () => {
-    const store = await MarketStore.open(null, () => createMarketData({ name: 'Room', goal: 'Goal.' }));
+    const store = await AgoraStore.open(null, () => createAgoraData({ name: 'Room', goal: 'Goal.' }));
     await assert.rejects(
       store.mutate((data) => {
         data.room.goal = 'half-applied';
@@ -81,7 +81,7 @@ describe('the room on disk', () => {
   });
 
   it('serializes concurrent mutations instead of interleaving them', async () => {
-    const store = await MarketStore.open(null, () => createMarketData({ name: 'Room', goal: 'Goal.' }));
+    const store = await AgoraStore.open(null, () => createAgoraData({ name: 'Room', goal: 'Goal.' }));
     await Promise.all(
       Array.from({ length: 25 }, (_, index) =>
         store.mutate((data) => {

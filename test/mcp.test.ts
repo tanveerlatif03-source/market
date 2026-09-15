@@ -3,18 +3,19 @@ import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { LoggingMessageNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createMarketServer } from '../src/http/server.ts';
+import { createAgoraServer } from '../src/http/server.ts';
 import { openRoom } from '../src/index.ts';
-import type { MarketServer } from '../src/http/server.ts';
+import type { AgoraServer } from '../src/http/server.ts';
 import type { RoomService } from '../src/room/service.ts';
 import { AUTH_PAGE_PLAN } from './helpers.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 interface ToolError {
   error: { code: string; message: string; remedy: string; details?: Record<string, unknown> };
 }
 
 let service: RoomService;
-let server: MarketServer;
+let server: AgoraServer;
 let base: string;
 let supervisorToken = '';
 const tokens: Record<string, string> = {};
@@ -72,13 +73,13 @@ async function supervisor(path: string, body?: unknown): Promise<Record<string, 
 
 before(async () => {
   service = await openRoom({ file: null, name: 'Auth page', goal: 'Ship a working auth page.' });
-  const lead = await service.addAgent({
+  const lead = await service.addAgent(OWNER_ID, {
     id: 'claude',
     displayName: 'Claude',
     provider: 'claude-code',
     role: 'lead'
   });
-  const peer = await service.addAgent({
+  const peer = await service.addAgent(OWNER_ID, {
     id: 'cursor',
     displayName: 'Cursor',
     provider: 'cursor',
@@ -86,9 +87,9 @@ before(async () => {
   });
   tokens.claude = lead.token;
   tokens.cursor = peer.token;
-  supervisorToken = await service.createSupervisorToken('test');
+  supervisorToken = await service.createSupervisorToken(OWNER_ID, 'test');
 
-  server = createMarketServer(service, { host: '127.0.0.1', port: 0 });
+  server = createAgoraServer(service, { host: '127.0.0.1', port: 0 });
   const address = await server.listen();
   base = `http://127.0.0.1:${address.port}`;
 });
@@ -110,13 +111,35 @@ describe('the MCP surface', () => {
     assert.equal(payload.error.code, 'UNAUTHORIZED');
   });
 
-  it('offers exactly the four tools of the milestone', async () => {
+  it('offers the room verbs, including per-file claims', async () => {
     const client = await connect('probe', tokens.claude as string);
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ['claim_task', 'post_message', 'read_room', 'submit_work']
+      [
+        'claim_file',
+        'claim_task',
+        'dissent',
+        'finish_row',
+        'open_sweep',
+        'post_message',
+        'read_room',
+        'release_file',
+        'report_missing',
+        'report_usage',
+        'review_lane',
+        'show_evidence',
+        'submit_work',
+        'take_rows',
+        'why_is_this'
+      ]
     );
+    await client.close();
+  });
+
+  it('tells a joining agent to claim files before writing them', async () => {
+    const client = await connect('probe-claims', tokens.claude as string);
+    assert.match(client.getInstructions() ?? '', /claim_file before you write/);
     await client.close();
   });
 
@@ -243,14 +266,14 @@ describe('two agents build an auth page', () => {
 describe('the human can stop an agent mid-flight', () => {
   it('refuses every write from a paused agent until it is resumed', async () => {
     const service2 = await openRoom({ file: null, name: 'Pause', goal: 'Test the pause button.' });
-    const lead = await service2.addAgent({
+    const lead = await service2.addAgent(OWNER_ID, {
       id: 'claude',
       displayName: 'Claude',
       provider: 'claude-code',
       role: 'lead'
     });
-    const token = await service2.createSupervisorToken('test');
-    const paused = createMarketServer(service2, { host: '127.0.0.1', port: 0 });
+    const token = await service2.createSupervisorToken(OWNER_ID, 'test');
+    const paused = createAgoraServer(service2, { host: '127.0.0.1', port: 0 });
     const address = await paused.listen();
     const pausedBase = `http://127.0.0.1:${address.port}`;
 
@@ -307,7 +330,7 @@ describe('the supervisor endpoints', () => {
   it('serve the dashboard and a health check', async () => {
     const page = await fetch(`${base}/`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Market/);
+    assert.match(await page.text(), /Agora/);
 
     const health = await fetch(`${base}/healthz`);
     assert.equal(health.status, 200);

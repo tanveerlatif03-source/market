@@ -1,8 +1,9 @@
 import { openRoom } from '../src/index.ts';
 import type { RoomService } from '../src/room/service.ts';
 import type { PlanProposal } from '../src/room/service.ts';
-import { isMarketError } from '../src/errors.ts';
-import type { MarketErrorCode } from '../src/errors.ts';
+import { isAgoraError } from '../src/errors.ts';
+import type { AgoraErrorCode } from '../src/errors.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 export const AUTH_PAGE_PLAN: PlanProposal = {
   summary: 'Two lanes that meet at one HTTP contract.',
@@ -12,14 +13,16 @@ export const AUTH_PAGE_PLAN: PlanProposal = {
       title: 'Auth page UI',
       description: 'The sign-in form and its states.',
       paths: ['src/auth/AuthPage.tsx'],
-      suggestedOwner: 'claude'
+      suggestedOwner: 'claude',
+      evidence: 'Signing in with a good password reaches the dashboard; a bad one shows the 401 text.'
     },
     {
       key: 'api',
       title: 'Auth API route',
       description: 'The endpoint the form posts to.',
       paths: ['src/auth/api.ts'],
-      suggestedOwner: 'cursor'
+      suggestedOwner: 'cursor',
+      evidence: 'POST /api/auth/login returns a token for a known user and 401 for a bad password.'
     }
   ],
   seams: [
@@ -57,19 +60,19 @@ export async function twoAgentRoom(): Promise<{
     name: 'Auth page',
     goal: 'Ship a working auth page.'
   });
-  const lead = await service.addAgent({
+  const lead = await service.addAgent(OWNER_ID, {
     id: 'claude',
     displayName: 'Claude',
     provider: 'claude-code',
     role: 'lead'
   });
-  const peer = await service.addAgent({
+  const peer = await service.addAgent(OWNER_ID, {
     id: 'cursor',
     displayName: 'Cursor',
     provider: 'cursor',
     role: 'peer'
   });
-  const supervisorToken = await service.createSupervisorToken('test');
+  const supervisorToken = await service.createSupervisorToken(OWNER_ID, 'test');
   return {
     service,
     claude: lead.agent.id,
@@ -92,7 +95,7 @@ export async function roomWithApprovedPlan(): Promise<
     outcome: 'needs-review',
     plan: AUTH_PAGE_PLAN
   });
-  await room.service.approvePlan('Looks right.');
+  await room.service.approvePlan(OWNER_ID, 'Looks right.');
   const snapshot = room.service.snapshot();
   const ui = snapshot.tasks.find((task) => task.title === 'Auth page UI');
   const api = snapshot.tasks.find((task) => task.title === 'Auth API route');
@@ -106,12 +109,12 @@ export async function roomWithApprovedPlan(): Promise<
 /** Asserts the call is refused with a specific code, and hands back the error. */
 export async function refusal(
   run: () => Promise<unknown>,
-  code: MarketErrorCode
-): Promise<{ code: MarketErrorCode; message: string; remedy: string; details: Record<string, unknown> }> {
+  code: AgoraErrorCode
+): Promise<{ code: AgoraErrorCode; message: string; remedy: string; details: Record<string, unknown> }> {
   try {
     await run();
   } catch (error) {
-    if (!isMarketError(error)) throw error;
+    if (!isAgoraError(error)) throw error;
     if (error.code !== code) {
       throw new Error(`Expected ${code}, got ${error.code}: ${error.message}`);
     }
