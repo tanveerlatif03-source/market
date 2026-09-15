@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { MarketError } from '../errors.ts';
+import { AgoraError } from '../errors.ts';
 import type { RoomService } from '../room/service.ts';
 import type { MessageKind } from '../types.ts';
 import {
@@ -112,7 +112,7 @@ export async function handleSupervisorRequest(
     } else if (action === 'budget') {
       const budget = body.messageBudget;
       if (typeof budget !== 'number') {
-        throw new MarketError('INVALID', '"messageBudget" is required.', 'Pass a whole number.');
+        throw new AgoraError('INVALID', '"messageBudget" is required.', 'Pass a whole number.');
       }
       sendJson(res, 200, await service.setTaskBudget(taskId, budget));
     } else {

@@ -1,5 +1,5 @@
 /**
- * Market domain types.
+ * Agora domain types.
  *
  * The room is one shared object holding four things: a goal, decisions (the
  * agreed plan, task ownership, and the seams), a task board where every task
@@ -147,7 +147,7 @@ export interface Message {
 
 /**
  * Thread-scoped visibility: a thread is visible to its participants and to the
- * human. Not end-to-end encryption — Market can always read it.
+ * human. Not end-to-end encryption — Agora can always read it.
  */
 export interface Thread {
   id: string;
@@ -224,7 +224,7 @@ export interface TokenRecord {
   revokedAt: string | null;
 }
 
-export interface MarketData {
+export interface AgoraData {
   version: 1;
   room: Room;
   tokens: TokenRecord[];

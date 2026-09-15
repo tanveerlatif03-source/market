@@ -2,21 +2,21 @@
 import { access } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { EventBus } from './events.ts';
-import { MarketStore } from './store/store.ts';
+import { AgoraStore } from './store/store.ts';
 import { RoomService } from './room/service.ts';
-import { createMarketData, PLAN_TASK_ID } from './room/seed.ts';
-import { createMarketServer } from './http/server.ts';
+import { createAgoraData, PLAN_TASK_ID } from './room/seed.ts';
+import { createAgoraServer } from './http/server.ts';
 import { loadConfig } from './config.ts';
-import { isMarketError } from './errors.ts';
+import { isAgoraError } from './errors.ts';
 
-const USAGE = `Market — a shared room where agents from different tools work on one project.
+const USAGE = `Agora — a shared room where agents from different tools work on one project.
 
 Usage:
-  market init --name <room> --goal <goal>      Create the room.
-  market agent add --name <name> [options]     Add an agent and mint its room token.
-  market token supervisor [--label <label>]    Mint a token for the human's dashboard.
-  market serve [--host <host>] [--port <port>] Run the room.
-  market status                                Print the board.
+  agora init --name <room> --goal <goal>      Create the room.
+  agora agent add --name <name> [options]     Add an agent and mint its room token.
+  agora token supervisor [--label <label>]    Mint a token for the human's dashboard.
+  agora serve [--host <host>] [--port <port>] Run the room.
+  agora status                                Print the board.
 
 Options for "agent add":
   --name <name>        Display name, e.g. "Claude".
@@ -27,16 +27,16 @@ Options for "agent add":
   --paths <a,b>        Paths this agent may read. Default "**" (all).
 
 Environment:
-  MARKET_DIR           Where the room is stored (default ./.market)
-  MARKET_HOST          Bind host (default 127.0.0.1)
-  MARKET_PORT          Bind port (default 8787)
-  MARKET_ALLOWED_HOSTS Comma-separated Host values to accept, enabling DNS rebinding protection.
+  AGORA_DIR           Where the room is stored (default ./.agora)
+  AGORA_HOST          Bind host (default 127.0.0.1)
+  AGORA_PORT          Bind port (default 8787)
+  AGORA_ALLOWED_HOSTS Comma-separated Host values to accept, enabling DNS rebinding protection.
 `;
 
 async function openService(): Promise<RoomService> {
   const config = loadConfig();
-  const store = await MarketStore.open(config.roomFile, () => {
-    throw new Error(`No room at ${config.roomFile}. Run "market init" first.`);
+  const store = await AgoraStore.open(config.roomFile, () => {
+    throw new Error(`No room at ${config.roomFile}. Run "agora init" first.`);
   });
   return new RoomService(store, new EventBus());
 }
@@ -48,10 +48,10 @@ async function cmdInit(argv: string[]): Promise<void> {
     allowPositionals: false
   });
   const config = loadConfig();
-  const name = values.name ?? 'Market room';
+  const name = values.name ?? 'Agora room';
   const goal = values.goal ?? 'No goal set yet.';
   const existed = await access(config.roomFile).then(() => true, () => false);
-  const store = await MarketStore.open(config.roomFile, () => createMarketData({ name, goal }));
+  const store = await AgoraStore.open(config.roomFile, () => createAgoraData({ name, goal }));
   const room = new RoomService(store, new EventBus()).snapshot();
   if (existed) {
     console.log(`A room already exists at ${config.roomFile}: "${room.name}".`);
@@ -59,7 +59,7 @@ async function cmdInit(argv: string[]): Promise<void> {
     return;
   }
   console.log(`Room "${room.name}" created at ${config.roomFile}.`);
-  console.log('Next: market agent add --name "Claude" --provider claude-code --role lead');
+  console.log('Next: agora agent add --name "Claude" --provider claude-code --role lead');
 }
 
 async function cmdAgentAdd(argv: string[]): Promise<void> {
@@ -100,9 +100,9 @@ function snippetFor(provider: string, url: string, token: string): string {
   if (provider.includes('codex')) {
     return [
       '  # ~/.codex/config.toml',
-      '  [mcp_servers.market]',
+      '  [mcp_servers.agora]',
       `  url = "${url}"`,
-      '  [mcp_servers.market.http_headers]',
+      '  [mcp_servers.agora.http_headers]',
       `  Authorization = "Bearer ${token}"`
     ].join('\n');
   }
@@ -111,7 +111,7 @@ function snippetFor(provider: string, url: string, token: string): string {
     `  # ${file}`,
     '  {',
     '    "mcpServers": {',
-    '      "market": {',
+    '      "agora": {',
     '        "type": "http",',
     `        "url": "${url}",`,
     `        "headers": { "Authorization": "Bearer ${token}" }`,
@@ -141,7 +141,7 @@ async function cmdServe(argv: string[]): Promise<void> {
     ...(values.port !== undefined ? { port: Number(values.port) } : {})
   });
   const service = await openService();
-  const server = createMarketServer(service, {
+  const server = createAgoraServer(service, {
     host: config.host,
     port: config.port,
     allowedHosts: config.allowedHosts
@@ -149,7 +149,7 @@ async function cmdServe(argv: string[]): Promise<void> {
   const address = await server.listen();
   const room = service.snapshot();
 
-  console.log(`Market room "${room.name}" is open.`);
+  console.log(`Agora room "${room.name}" is open.`);
   console.log(`  agents      http://${address.host}:${address.port}/mcp`);
   console.log(`  supervisor  http://${address.host}:${address.port}/`);
   console.log(`  agents in the room: ${room.agents.map((agent) => agent.id).join(', ') || 'none yet'}`);
@@ -189,11 +189,11 @@ async function main(): Promise<void> {
       await cmdInit([subcommand, ...rest].filter((value): value is string => value !== undefined));
       return;
     case 'agent':
-      if (subcommand !== 'add') throw new Error('Unknown command. Try "market agent add".');
+      if (subcommand !== 'add') throw new Error('Unknown command. Try "agora agent add".');
       await cmdAgentAdd(rest);
       return;
     case 'token':
-      if (subcommand !== 'supervisor') throw new Error('Unknown command. Try "market token supervisor".');
+      if (subcommand !== 'supervisor') throw new Error('Unknown command. Try "agora token supervisor".');
       await cmdTokenSupervisor(rest);
       return;
     case 'serve':
@@ -215,7 +215,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  if (isMarketError(error)) {
+  if (isAgoraError(error)) {
     console.error(`${error.message}\n${error.remedy}`);
   } else {
     console.error(error instanceof Error ? error.message : String(error));

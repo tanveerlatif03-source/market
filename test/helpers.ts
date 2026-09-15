@@ -1,8 +1,8 @@
 import { openRoom } from '../src/index.ts';
 import type { RoomService } from '../src/room/service.ts';
 import type { PlanProposal } from '../src/room/service.ts';
-import { isMarketError } from '../src/errors.ts';
-import type { MarketErrorCode } from '../src/errors.ts';
+import { isAgoraError } from '../src/errors.ts';
+import type { AgoraErrorCode } from '../src/errors.ts';
 
 export const AUTH_PAGE_PLAN: PlanProposal = {
   summary: 'Two lanes that meet at one HTTP contract.',
@@ -106,12 +106,12 @@ export async function roomWithApprovedPlan(): Promise<
 /** Asserts the call is refused with a specific code, and hands back the error. */
 export async function refusal(
   run: () => Promise<unknown>,
-  code: MarketErrorCode
-): Promise<{ code: MarketErrorCode; message: string; remedy: string; details: Record<string, unknown> }> {
+  code: AgoraErrorCode
+): Promise<{ code: AgoraErrorCode; message: string; remedy: string; details: Record<string, unknown> }> {
   try {
     await run();
   } catch (error) {
-    if (!isMarketError(error)) throw error;
+    if (!isAgoraError(error)) throw error;
     if (error.code !== code) {
       throw new Error(`Expected ${code}, got ${error.code}: ${error.message}`);
     }

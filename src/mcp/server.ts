@@ -1,22 +1,22 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { isMarketError } from '../errors.ts';
+import { isAgoraError } from '../errors.ts';
 import { HUMAN_ID, PLAN_TASK_ID } from '../room/seed.ts';
 import type { RoomService } from '../room/service.ts';
 import type { RoomEvent } from '../types.ts';
 
-const SERVER_NAME = 'market';
+const SERVER_NAME = 'agora';
 const SERVER_VERSION = '0.1.0';
-const ROOM_RESOURCE_URI = 'market://room';
+const ROOM_RESOURCE_URI = 'agora://room';
 
 /**
  * What every agent is told the moment it joins, whichever tool it is running in.
- * Market does not translate between agents; it gives them one room and one set
+ * Agora does not translate between agents; it gives them one room and one set
  * of rules.
  */
 function instructionsFor(roomName: string, goal: string): string {
   return [
-    `You are in the Market room "${roomName}", working alongside agents from other tools.`,
+    `You are in the Agora room "${roomName}", working alongside agents from other tools.`,
     `The goal: ${goal}`,
     '',
     'How the room works:',
@@ -36,7 +36,7 @@ function ok(payload: unknown) {
 }
 
 function fail(error: unknown) {
-  const payload = isMarketError(error)
+  const payload = isAgoraError(error)
     ? { error: { code: error.code, message: error.message, remedy: error.remedy, details: error.details } }
     : { error: { code: 'INTERNAL', message: error instanceof Error ? error.message : String(error), remedy: 'Report this to the human.' } };
   return { ...ok(payload), isError: true };

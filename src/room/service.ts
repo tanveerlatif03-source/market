@@ -1,6 +1,6 @@
-import { MarketError } from '../errors.ts';
+import { AgoraError } from '../errors.ts';
 import { EventBus } from '../events.ts';
-import { MarketStore } from '../store/store.ts';
+import { AgoraStore } from '../store/store.ts';
 import { hashToken, newToken, nowIso, shortId, slugify } from '../ids.ts';
 import { normalizePath, ownersOfPaths, pathsOutsideLane } from '../paths.ts';
 import { DEFAULT_MESSAGE_BUDGET, HUMAN_ID, PLAN_TASK_ID } from './seed.ts';
@@ -11,7 +11,7 @@ import type {
   AgentScope,
   AgentStatus,
   Decision,
-  MarketData,
+  AgoraData,
   MessageKind,
   Room,
   RoomEvent,
@@ -126,14 +126,14 @@ function scopeAllows(agent: Agent, taskId: string): boolean {
 }
 
 /**
- * Every rule in Market lives here: who owns what, who may say what to whom,
+ * Every rule in Agora lives here: who owns what, who may say what to whom,
  * what a seam costs to cross, and when an agent has to stop and ask the human.
  */
 export class RoomService {
-  private readonly store: MarketStore;
+  private readonly store: AgoraStore;
   private readonly bus: EventBus;
 
-  constructor(store: MarketStore, bus: EventBus) {
+  constructor(store: AgoraStore, bus: EventBus) {
     this.store = store;
     this.bus = bus;
   }
@@ -190,7 +190,7 @@ export class RoomService {
 
       if (task.id === PLAN_TASK_ID) {
         if (agent.role !== 'lead') {
-          throw new MarketError(
+          throw new AgoraError(
             'NOT_LEAD',
             'Only the room lead proposes the plan.',
             `Wait for ${room.lead ?? 'the lead'} to propose a split, or discuss the seams with post_message.`,
@@ -199,7 +199,7 @@ export class RoomService {
         }
       } else {
         if (room.plan.status !== 'approved') {
-          throw new MarketError(
+          throw new AgoraError(
             'PLAN_NOT_APPROVED',
             `The plan is "${room.plan.status}", so no task is claimable yet.`,
             'Wait for the human to approve the plan, then claim again.',
@@ -207,7 +207,7 @@ export class RoomService {
           );
         }
         if (!scopeAllows(agent, task.id)) {
-          throw new MarketError(
+          throw new AgoraError(
             'OUT_OF_SCOPE',
             `Your permission scope does not cover "${task.id}".`,
             'Ask the human to widen your scope, or claim a task you are scoped for.',
@@ -222,7 +222,7 @@ export class RoomService {
       }
 
       if (task.owner !== null) {
-        throw new MarketError(
+        throw new AgoraError(
           'TASK_OWNED',
           `"${task.id}" is owned by ${task.owner}.`,
           `One owner per task. Ask ${task.owner} in the thread: post_message with task_id "${task.id}" and kind "ask".`,
@@ -231,7 +231,7 @@ export class RoomService {
       }
 
       if (task.status !== 'open') {
-        throw new MarketError(
+        throw new AgoraError(
           'INVALID',
           `"${task.id}" is ${task.status}, not open.`,
           'Ask the human to reopen it if it needs more work.',
@@ -274,10 +274,10 @@ export class RoomService {
 
       const body = input.body.trim();
       if (body.length === 0) {
-        throw new MarketError('INVALID', 'The message body is empty.', 'Say the ask or the answer.');
+        throw new AgoraError('INVALID', 'The message body is empty.', 'Say the ask or the answer.');
       }
       if (body.length > MAX_MESSAGE_CHARS) {
-        throw new MarketError(
+        throw new AgoraError(
           'INVALID',
           `The message is ${body.length} characters; the limit is ${MAX_MESSAGE_CHARS}.`,
           'Send the ask or the answer, not the reasoning behind it. Reasoning belongs in status_note, which only the human reads.',
@@ -287,7 +287,7 @@ export class RoomService {
 
       if (task.messagesUsed >= task.messageBudget) {
         this.haltOnBudget(room, task, emit);
-        throw new MarketError(
+        throw new AgoraError(
           'BUDGET_EXHAUSTED',
           `"${task.id}" has used all ${task.messageBudget} of its messages.`,
           'Stop and wait. The human has been asked to raise the budget or redirect the work.',
@@ -355,7 +355,7 @@ export class RoomService {
       const task = this.taskOf(room, input.taskId);
 
       if (task.owner !== agent.id) {
-        throw new MarketError(
+        throw new AgoraError(
           'NOT_OWNER',
           `"${task.id}" is owned by ${task.owner ?? 'nobody'}.`,
           task.owner === null
@@ -370,7 +370,7 @@ export class RoomService {
       }
 
       if (room.plan.status !== 'approved') {
-        throw new MarketError(
+        throw new AgoraError(
           'PLAN_NOT_APPROVED',
           `The plan is "${room.plan.status}".`,
           'Wait for the human to approve the plan before submitting work.',
@@ -383,7 +383,7 @@ export class RoomService {
       if (outside.length > 0) {
         const owners = ownersOfPaths(outside, room.tasks, task.id);
         const owner = owners.find((hit) => hit.owner !== null);
-        throw new MarketError(
+        throw new AgoraError(
           'OUT_OF_SCOPE',
           `These files are outside the lane of "${task.id}": ${outside.join(', ')}.`,
           owner === undefined
@@ -396,7 +396,7 @@ export class RoomService {
       const seamChecks = input.seamChecks ?? [];
       for (const check of seamChecks) {
         if (!room.decisions.some((decision) => decision.id === check.decisionId)) {
-          throw new MarketError(
+          throw new AgoraError(
             'NOT_FOUND',
             `No decision "${check.decisionId}" in this room.`,
             'Use the decision ids from read_room.',
@@ -409,7 +409,7 @@ export class RoomService {
         const checked = new Map(seamChecks.map((check) => [check.decisionId, check]));
         const missing = task.seams.filter((seamId) => !checked.has(seamId));
         if (missing.length > 0) {
-          throw new MarketError(
+          throw new AgoraError(
             'INVALID',
             `"${task.id}" touches ${task.seams.length} seam(s); ${missing.join(', ')} went unconfirmed.`,
             'Both sides build toward a fixed point, so confirm each seam in seam_checks before calling this complete.',
@@ -418,7 +418,7 @@ export class RoomService {
         }
         const unsatisfied = task.seams.filter((seamId) => checked.get(seamId)?.satisfied === false);
         if (unsatisfied.length > 0) {
-          throw new MarketError(
+          throw new AgoraError(
             'INVALID',
             `Seam(s) ${unsatisfied.join(', ')} are not satisfied, so this is not complete.`,
             'Submit with outcome "needs-review" or "blocked", and say in the thread what changed on your side.',
@@ -495,10 +495,10 @@ export class RoomService {
     emit: EmitFn
   ): SubmitWorkResult {
     if (agent.role !== 'lead') {
-      throw new MarketError('NOT_LEAD', 'Only the room lead proposes the plan.', 'Leave the plan to the lead.');
+      throw new AgoraError('NOT_LEAD', 'Only the room lead proposes the plan.', 'Leave the plan to the lead.');
     }
     if (room.plan.status === 'approved') {
-      throw new MarketError(
+      throw new AgoraError(
         'INVALID',
         'The plan is already approved.',
         'Ask the human to reopen the plan before changing the split; others have built on it.'
@@ -506,7 +506,7 @@ export class RoomService {
     }
     const proposal = input.plan;
     if (proposal === undefined || proposal.tasks.length === 0) {
-      throw new MarketError(
+      throw new AgoraError(
         'INVALID',
         'A plan proposal needs at least one task.',
         'Pass a "plan" object with the task split and the seam between every pair of tasks that touch.'
@@ -515,12 +515,12 @@ export class RoomService {
 
     const keys = proposal.tasks.map((task) => task.key);
     if (new Set(keys).size !== keys.length) {
-      throw new MarketError('INVALID', 'Task keys must be unique.', 'Give every task in the split its own key.');
+      throw new AgoraError('INVALID', 'Task keys must be unique.', 'Give every task in the split its own key.');
     }
     for (const seam of proposal.seams) {
       for (const key of seam.between) {
         if (!keys.includes(key)) {
-          throw new MarketError(
+          throw new AgoraError(
             'INVALID',
             `Seam "${seam.title}" refers to unknown task key "${key}".`,
             'Seams may only join tasks in this proposal.',
@@ -530,7 +530,7 @@ export class RoomService {
       }
       for (const side of seam.contract) {
         if (!seam.between.includes(side.task)) {
-          throw new MarketError(
+          throw new AgoraError(
             'INVALID',
             `Seam "${seam.title}" has a contract for "${side.task}", which is not one of its two sides.`,
             'A seam contract describes exactly the two tasks that touch.',
@@ -718,10 +718,10 @@ export class RoomService {
       const room = data.room;
       const id = slugify(options.id ?? options.displayName, 'agent');
       if (room.agents.some((existing) => existing.id === id)) {
-        throw new MarketError('INVALID', `An agent "${id}" is already in this room.`, 'Pick another id.');
+        throw new AgoraError('INVALID', `An agent "${id}" is already in this room.`, 'Pick another id.');
       }
       if (options.role === 'lead' && room.lead !== null) {
-        throw new MarketError(
+        throw new AgoraError(
           'INVALID',
           `"${room.lead}" is already lead of this room.`,
           'A room has one lead. Add this agent as a peer.'
@@ -790,7 +790,7 @@ export class RoomService {
     return this.apply((data, emit) => {
       const room = data.room;
       if (room.plan.status !== 'proposed') {
-        throw new MarketError(
+        throw new AgoraError(
           'INVALID',
           `The plan is "${room.plan.status}", so there is nothing to approve.`,
           'Wait for the lead to propose a split.'
@@ -828,7 +828,7 @@ export class RoomService {
     return this.apply((data, emit) => {
       const room = data.room;
       if (room.plan.status !== 'proposed') {
-        throw new MarketError(
+        throw new AgoraError(
           'INVALID',
           `The plan is "${room.plan.status}", so there is nothing to reject.`,
           'Wait for the lead to propose a split.'
@@ -915,7 +915,7 @@ export class RoomService {
       const task = this.taskOf(room, taskId);
       const agent = this.agentOf(data, agentId);
       if (task.status === 'accepted') {
-        throw new MarketError(
+        throw new AgoraError(
           'INVALID',
           `"${task.id}" is already accepted.`,
           'Reopen it first if it needs more work.'
@@ -988,7 +988,7 @@ export class RoomService {
     return this.apply((data, emit) => {
       const task = this.taskOf(data.room, taskId);
       if (!Number.isInteger(messageBudget) || messageBudget < 0) {
-        throw new MarketError('INVALID', 'A message budget is a non-negative integer.', 'Pass a whole number.');
+        throw new AgoraError('INVALID', 'A message budget is a non-negative integer.', 'Pass a whole number.');
       }
       task.messageBudget = messageBudget;
       if (messageBudget > task.messagesUsed) task.budgetHaltedAt = null;
@@ -1089,7 +1089,7 @@ export class RoomService {
 
   // ------------------------------------------------------------- internals
 
-  private async apply<T>(fn: (data: MarketData, emit: EmitFn) => T): Promise<T> {
+  private async apply<T>(fn: (data: AgoraData, emit: EmitFn) => T): Promise<T> {
     const outcome = await this.store.mutate((data) => {
       const emitted: RoomEvent[] = [];
       const emit: EmitFn = (partial) => {
@@ -1106,10 +1106,10 @@ export class RoomService {
     return outcome.value;
   }
 
-  private agentOf(data: MarketData, agentId: string): Agent {
+  private agentOf(data: AgoraData, agentId: string): Agent {
     const agent = data.room.agents.find((candidate) => candidate.id === agentId);
     if (agent === undefined) {
-      throw new MarketError(
+      throw new AgoraError(
         'UNAUTHORIZED',
         `No agent "${agentId}" in this room.`,
         'Ask the human for a room token for this agent.'
@@ -1121,7 +1121,7 @@ export class RoomService {
   private taskOf(room: Room, taskId: string): Task {
     const task = room.tasks.find((candidate) => candidate.id === taskId);
     if (task === undefined) {
-      throw new MarketError(
+      throw new AgoraError(
         'NOT_FOUND',
         `No task "${taskId}" on this board.`,
         `Call read_room for the board. Known tasks: ${room.tasks.map((entry) => entry.id).join(', ')}.`,
@@ -1133,7 +1133,7 @@ export class RoomService {
 
   private requireActive(agent: Agent): void {
     if (agent.paused) {
-      throw new MarketError(
+      throw new AgoraError(
         'AGENT_PAUSED',
         `The human paused you${agent.pausedReason !== null ? `: ${agent.pausedReason}` : ''}.`,
         'Stop working and wait to be resumed. Do not retry.',
@@ -1201,14 +1201,14 @@ export class RoomService {
     if (input.threadId !== undefined) {
       const thread = room.threads.find((candidate) => candidate.id === input.threadId);
       if (thread === undefined || !thread.participants.includes(sender.id)) {
-        throw new MarketError(
+        throw new AgoraError(
           'NOT_FOUND',
           `No thread "${input.threadId}" is visible to you.`,
           'Threads are visible only to the agents in them. Start a new one by naming recipients in "to".'
         );
       }
       if (thread.taskId !== task.id) {
-        throw new MarketError(
+        throw new AgoraError(
           'INVALID',
           `Thread "${thread.id}" belongs to task "${thread.taskId}", not "${task.id}".`,
           'Every message attaches to one task. Use that task_id, or start a new thread.'
@@ -1219,7 +1219,7 @@ export class RoomService {
 
     const recipients = unique(input.to ?? []).filter((id) => id !== sender.id);
     if (recipients.length === 0) {
-      throw new MarketError(
+      throw new AgoraError(
         'INVALID',
         'A new thread needs at least one recipient.',
         `Pass "to" with agent ids, or "${HUMAN_ID}" to ask the human.`
@@ -1228,7 +1228,7 @@ export class RoomService {
     for (const recipient of recipients) {
       if (recipient === HUMAN_ID) continue;
       if (!room.agents.some((agent) => agent.id === recipient)) {
-        throw new MarketError(
+        throw new AgoraError(
           'NOT_FOUND',
           `No agent "${recipient}" in this room.`,
           `Known agents: ${room.agents.map((agent) => agent.id).join(', ')}.`,

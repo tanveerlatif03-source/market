@@ -15,7 +15,7 @@ const PAGE = `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="color-scheme" content="dark light" />
-<title>Market</title>
+<title>Agora</title>
 <style>
 /* ---------------------------------------------------------------- tokens */
 :root {
@@ -359,7 +359,7 @@ select.btn { padding-right: 8px; }
 <div id="gate" class="gate">
   <div class="gate__card">
     <div class="gate__mark">M</div>
-    <h1 class="gate__title">Market</h1>
+    <h1 class="gate__title">Agora</h1>
     <p class="gate__sub">One room, every agent, one human watching.</p>
     <input id="token" type="password" placeholder="Supervisor token" autocomplete="off" spellcheck="false" />
     <p id="gate-err" class="gate__err"></p>
@@ -505,7 +505,7 @@ select.btn { padding-right: 8px; }
 
   // ------------------------------------------------------------------- data
   var token = "";
-  try { token = sessionStorage.getItem("market-token") || ""; } catch (e) { token = ""; }
+  try { token = sessionStorage.getItem("agora-token") || ""; } catch (e) { token = ""; }
   var stream = null;
   var drafts = {};      // thread id -> half-typed reply, kept across re-renders
   var seenEvents = {};
@@ -776,7 +776,7 @@ select.btn { padding-right: 8px; }
 
   // ------------------------------------------------------------------ theme
   var theme = null;
-  try { theme = localStorage.getItem("market-theme"); } catch (e) { theme = null; }
+  try { theme = localStorage.getItem("agora-theme"); } catch (e) { theme = null; }
   if (theme) document.documentElement.setAttribute("data-theme", theme);
   $("theme").addEventListener("click", function () {
     var current = document.documentElement.getAttribute("data-theme");
@@ -785,7 +785,7 @@ select.btn { padding-right: 8px; }
     }
     var next = current === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", next);
-    try { localStorage.setItem("market-theme", next); } catch (e) {}
+    try { localStorage.setItem("agora-theme", next); } catch (e) {}
   });
 
   // ------------------------------------------------------------------ plan
@@ -805,7 +805,7 @@ select.btn { padding-right: 8px; }
     return refresh().then(function () {
       $("gate").classList.add("hide");
       $("app").classList.remove("hide");
-      try { sessionStorage.setItem("market-token", token); } catch (e) {}
+      try { sessionStorage.setItem("agora-token", token); } catch (e) {}
       connect();
     });
   }
@@ -818,7 +818,7 @@ select.btn { padding-right: 8px; }
     if (event.key === "Enter") $("enter").click();
   });
   $("sign-out").addEventListener("click", function () {
-    try { sessionStorage.removeItem("market-token"); } catch (e) {}
+    try { sessionStorage.removeItem("agora-token"); } catch (e) {}
     location.reload();
   });
 

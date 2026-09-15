@@ -10,7 +10,7 @@ import { dashboardHtml } from './dashboard.ts';
 import { handleSupervisorRequest } from './supervisor.ts';
 import { bearerToken, queryToken, readJsonBody, sendError, sendJson } from './util.ts';
 
-export interface MarketServerOptions {
+export interface AgoraServerOptions {
   host?: string;
   port?: number;
   /** Host header values accepted when DNS rebinding protection is on. */
@@ -23,7 +23,7 @@ interface McpSession {
   agentId: string;
 }
 
-export interface MarketServer {
+export interface AgoraServer {
   server: Server;
   listen: () => Promise<{ host: string; port: number }>;
   close: () => Promise<void>;
@@ -33,7 +33,7 @@ export interface MarketServer {
  * One endpoint each: agents speak MCP at /mcp with their room token, the human
  * watches and steers at /api and /.
  */
-export function createMarketServer(service: RoomService, options: MarketServerOptions = {}): MarketServer {
+export function createAgoraServer(service: RoomService, options: AgoraServerOptions = {}): AgoraServer {
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 8787;
   const sessions = new Map<string, McpSession>();
@@ -41,11 +41,11 @@ export function createMarketServer(service: RoomService, options: MarketServerOp
   async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const principal = service.authenticate(bearerToken(req));
     if (principal === null || principal.kind !== 'agent' || principal.agentId === null) {
-      res.setHeader('www-authenticate', 'Bearer realm="market"');
+      res.setHeader('www-authenticate', 'Bearer realm="agora"');
       sendJson(res, 401, {
         error: {
           code: 'UNAUTHORIZED',
-          message: 'This endpoint needs a Market room token.',
+          message: 'This endpoint needs a Agora room token.',
           remedy: 'Ask the human for the token for this agent and set it as a Bearer header.'
         }
       });
@@ -129,7 +129,7 @@ export function createMarketServer(service: RoomService, options: MarketServerOp
         error: {
           code: 'UNAUTHORIZED',
           message: 'This endpoint needs the supervisor token.',
-          remedy: 'Run `market token supervisor` to mint one.'
+          remedy: 'Run `agora token supervisor` to mint one.'
         }
       });
       return;

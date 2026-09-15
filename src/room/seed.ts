@@ -1,5 +1,5 @@
 import { nowIso, shortId } from '../ids.ts';
-import type { MarketData, Room, Task } from '../types.ts';
+import type { AgoraData, Room, Task } from '../types.ts';
 
 /**
  * The lead's own task. It exists from the moment the room does, so proposing
@@ -76,6 +76,6 @@ export function createRoom(options: { name: string; goal: string }): Room {
   };
 }
 
-export function createMarketData(options: { name: string; goal: string }): MarketData {
+export function createAgoraData(options: { name: string; goal: string }): AgoraData {
   return { version: 1, room: createRoom(options), tokens: [] };
 }

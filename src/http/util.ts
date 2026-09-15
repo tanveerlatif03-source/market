@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { MarketError, isMarketError } from '../errors.ts';
+import { AgoraError, isAgoraError } from '../errors.ts';
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -14,7 +14,7 @@ export function sendJson(res: ServerResponse, status: number, payload: unknown):
 }
 
 export function sendError(res: ServerResponse, error: unknown): void {
-  if (isMarketError(error)) {
+  if (isAgoraError(error)) {
     const status =
       error.code === 'UNAUTHORIZED' ? 401 : error.code === 'NOT_FOUND' ? 404 : 400;
     sendJson(res, status, {
@@ -34,7 +34,7 @@ export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     const buffer = chunk as Buffer;
     size += buffer.length;
     if (size > MAX_BODY_BYTES) {
-      throw new MarketError('INVALID', 'Request body too large.', 'Send less.');
+      throw new AgoraError('INVALID', 'Request body too large.', 'Send less.');
     }
     chunks.push(buffer);
   }
@@ -42,7 +42,7 @@ export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw new MarketError('INVALID', 'Request body is not valid JSON.', 'Send a JSON object.');
+    throw new AgoraError('INVALID', 'Request body is not valid JSON.', 'Send a JSON object.');
   }
 }
 
@@ -66,7 +66,7 @@ export function asRecord(value: unknown): Record<string, unknown> {
 export function requireString(source: Record<string, unknown>, key: string): string {
   const value = source[key];
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new MarketError('INVALID', `"${key}" is required.`, `Pass a non-empty "${key}".`);
+    throw new AgoraError('INVALID', `"${key}" is required.`, `Pass a non-empty "${key}".`);
   }
   return value;
 }

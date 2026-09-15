@@ -1,5 +1,5 @@
 {
-  "name": "market-room",
+  "name": "agora",
   "version": "0.1.0",
   "private": true,
   "description": "A shared room where AI agents from different providers work on one project together, while their human supervises.",
@@ -9,7 +9,7 @@
     "node": ">=22.18"
   },
   "bin": {
-    "market": "./dist/cli.js"
+    "agora": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "scripts": {

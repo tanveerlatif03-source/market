@@ -3,9 +3,9 @@ import { after, before, describe, it } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { LoggingMessageNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createMarketServer } from '../src/http/server.ts';
+import { createAgoraServer } from '../src/http/server.ts';
 import { openRoom } from '../src/index.ts';
-import type { MarketServer } from '../src/http/server.ts';
+import type { AgoraServer } from '../src/http/server.ts';
 import type { RoomService } from '../src/room/service.ts';
 import { AUTH_PAGE_PLAN } from './helpers.ts';
 
@@ -14,7 +14,7 @@ interface ToolError {
 }
 
 let service: RoomService;
-let server: MarketServer;
+let server: AgoraServer;
 let base: string;
 let supervisorToken = '';
 const tokens: Record<string, string> = {};
@@ -88,7 +88,7 @@ before(async () => {
   tokens.cursor = peer.token;
   supervisorToken = await service.createSupervisorToken('test');
 
-  server = createMarketServer(service, { host: '127.0.0.1', port: 0 });
+  server = createAgoraServer(service, { host: '127.0.0.1', port: 0 });
   const address = await server.listen();
   base = `http://127.0.0.1:${address.port}`;
 });
@@ -250,7 +250,7 @@ describe('the human can stop an agent mid-flight', () => {
       role: 'lead'
     });
     const token = await service2.createSupervisorToken('test');
-    const paused = createMarketServer(service2, { host: '127.0.0.1', port: 0 });
+    const paused = createAgoraServer(service2, { host: '127.0.0.1', port: 0 });
     const address = await paused.listen();
     const pausedBase = `http://127.0.0.1:${address.port}`;
 
@@ -307,7 +307,7 @@ describe('the supervisor endpoints', () => {
   it('serve the dashboard and a health check', async () => {
     const page = await fetch(`${base}/`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /Market/);
+    assert.match(await page.text(), /Agora/);
 
     const health = await fetch(`${base}/healthz`);
     assert.equal(health.status, 200);

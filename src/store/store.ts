@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import type { MarketData } from '../types.ts';
+import type { AgoraData } from '../types.ts';
 
 /** Events are an audit log, not an archive. Keep the tail bounded. */
 const MAX_EVENTS = 5000;
@@ -12,32 +12,32 @@ const MAX_EVENTS = 5000;
  * Every mutation is serialized through a promise chain and applied to a clone,
  * so a mutation that throws leaves the live room untouched.
  */
-export class MarketStore {
-  private data: MarketData;
+export class AgoraStore {
+  private data: AgoraData;
   private readonly file: string | null;
   private tail: Promise<unknown> = Promise.resolve();
 
-  private constructor(file: string | null, data: MarketData) {
+  private constructor(file: string | null, data: AgoraData) {
     this.file = file;
     this.data = data;
   }
 
   /** Loads the room from disk, or seeds it with `init` if the file is absent. */
-  static async open(file: string | null, init: () => MarketData): Promise<MarketStore> {
-    if (file === null) return new MarketStore(null, init());
+  static async open(file: string | null, init: () => AgoraData): Promise<AgoraStore> {
+    if (file === null) return new AgoraStore(null, init());
     try {
       const raw = await readFile(file, 'utf8');
-      return new MarketStore(file, JSON.parse(raw) as MarketData);
+      return new AgoraStore(file, JSON.parse(raw) as AgoraData);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      const store = new MarketStore(file, init());
+      const store = new AgoraStore(file, init());
       await store.persist();
       return store;
     }
   }
 
   /** Reads live state. Callers must not mutate what they get back. */
-  read<T>(fn: (data: MarketData) => T): T {
+  read<T>(fn: (data: AgoraData) => T): T {
     return fn(this.data);
   }
 
@@ -45,7 +45,7 @@ export class MarketStore {
    * Applies `fn` to a private copy of the room, then swaps it in and persists.
    * Mutations never interleave.
    */
-  async mutate<T>(fn: (data: MarketData) => T): Promise<T> {
+  async mutate<T>(fn: (data: AgoraData) => T): Promise<T> {
     const run = this.tail.then(async () => {
       const draft = structuredClone(this.data);
       const result = fn(draft);

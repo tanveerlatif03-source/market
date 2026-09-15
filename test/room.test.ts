@@ -460,7 +460,7 @@ describe('human controls', () => {
     assert.equal(room.service.authenticate(room.claudeToken)?.agentId, room.claude);
     assert.equal(room.service.authenticate(room.cursorToken)?.agentId, room.cursor);
     assert.equal(room.service.authenticate(room.supervisorToken)?.kind, 'supervisor');
-    assert.equal(room.service.authenticate('mkt_not-a-token'), null);
+    assert.equal(room.service.authenticate('agr_not-a-token'), null);
     assert.equal(room.service.authenticate(''), null);
   });
 
