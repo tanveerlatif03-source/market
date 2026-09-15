@@ -59,6 +59,7 @@ export function createRoom(options: { name: string; goal: string }): Room {
     agents: [],
     decisions: [],
     tasks: [planTask(at)],
+    claims: [],
     threads: [],
     events: [
       {

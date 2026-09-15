@@ -110,13 +110,19 @@ describe('the MCP surface', () => {
     assert.equal(payload.error.code, 'UNAUTHORIZED');
   });
 
-  it('offers exactly the four tools of the milestone', async () => {
+  it('offers the room verbs, including per-file claims', async () => {
     const client = await connect('probe', tokens.claude as string);
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ['claim_task', 'post_message', 'read_room', 'submit_work']
+      ['claim_file', 'claim_task', 'post_message', 'read_room', 'release_file', 'submit_work']
     );
+    await client.close();
+  });
+
+  it('tells a joining agent to claim files before writing them', async () => {
+    const client = await connect('probe-claims', tokens.claude as string);
+    assert.match(client.getInstructions() ?? '', /claim_file before you write/);
     await client.close();
   });
 

@@ -1,3 +1,7 @@
+import type { Claim } from './room/claims.ts';
+
+export type { Claim, ClaimState, ClaimHolderActivity } from './room/claims.ts';
+
 /**
  * Agora domain types.
  *
@@ -40,6 +44,8 @@ export interface Agent {
   status: AgentStatus;
   joinedAt: string;
   lastSeenAt: string | null;
+  /** Last time this agent claimed any file. Distinguishes "moved on" from "thinking". */
+  latestTouchAt: string | null;
 }
 
 export type PlanStatus = 'none' | 'proposed' | 'approved' | 'rejected';
@@ -179,7 +185,12 @@ export type RoomEventType =
   | 'task.blocked'
   | 'task.budget'
   | 'message.posted'
-  | 'budget.exhausted';
+  | 'budget.exhausted'
+  | 'claim.granted'
+  | 'claim.taken'
+  | 'claim.released'
+  | 'claim.collision'
+  | 'claim.swept';
 
 export interface RoomEvent {
   seq: number;
@@ -207,6 +218,8 @@ export interface Room {
   agents: Agent[];
   decisions: Decision[];
   tasks: Task[];
+  /** Per-file claims (Q2-Q5). One claim per path, room-wide. */
+  claims: Claim[];
   threads: Thread[];
   events: RoomEvent[];
   eventSeq: number;

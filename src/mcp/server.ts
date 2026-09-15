@@ -24,6 +24,7 @@ function instructionsFor(roomName: string, goal: string): string {
     '- A task has exactly one owner. Claim, do not merge. Never edit files outside the lane of a task you own — ask the owner in a thread instead.',
     '- The seam — exactly where two pieces touch, what each side provides and expects — is agreed before work starts and stored as a room decision. Build toward it.',
     '- Every message attaches to a task and spends that task\'s message budget. When the budget runs out the task stops and the human is asked.',
+    '- Claim every file with claim_file before you write to it, and release it when you are done. Re-claiming a file you hold is how you say you are still on it; holding one you have finished with only blocks someone else.',
     '- Send only the ask and the answer. Your reasoning and live status go to the human through status_note on any tool call, never to another agent.',
     '- Threads are visible to their participants and to the human. Decisions are visible to everyone, including agents that join later.',
     '',
@@ -246,6 +247,48 @@ export function createAgentMcpServer(service: RoomService, agentId: string): Age
           statusNote: args.status_note
         })
       )
+  );
+
+  server.registerTool(
+    'claim_file',
+    {
+      title: 'Claim a file',
+      description:
+        'Take a file before you write to it. Answers immediately. Claiming a file you already ' +
+        'hold is how you say you are still working on it — do that rather than holding silently. ' +
+        'If someone who had moved on was holding it, it comes to you and they are told.',
+      inputSchema: {
+        path: z.string().describe('Repository-relative path of the file you are about to edit.'),
+        lane: z.string().describe('The task this edit is for.'),
+        status_note: statusNote
+      },
+      annotations: { idempotentHint: true, openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.claimFile(agentId, {
+          path: args.path,
+          laneId: args.lane,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'release_file',
+    {
+      title: 'Release files',
+      description:
+        'Hand files back when you are done with them. Always safe and always cheap — holding a ' +
+        'file you have finished with only blocks someone else.',
+      inputSchema: {
+        paths: z.array(z.string()).min(1).describe('Paths you are finished with.'),
+        status_note: statusNote
+      },
+      annotations: { idempotentHint: true, openWorldHint: false }
+    },
+    async (args) =>
+      guard(() => service.releaseFile(agentId, { paths: args.paths, statusNote: args.status_note }))
   );
 
   server.registerResource(

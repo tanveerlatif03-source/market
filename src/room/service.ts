@@ -3,6 +3,13 @@ import { EventBus } from '../events.ts';
 import { AgoraStore } from '../store/store.ts';
 import { hashToken, newToken, nowIso, shortId, slugify } from '../ids.ts';
 import { normalizePath, ownersOfPaths, pathsOutsideLane } from '../paths.ts';
+import {
+  abandonedClaims,
+  claimsHeldBy,
+  requestClaim,
+  unclaimedChanges
+} from './claims.ts';
+import type { Claim, ClaimHolderActivity, ClaimState } from './claims.ts';
 import { DEFAULT_MESSAGE_BUDGET, HUMAN_ID, PLAN_TASK_ID } from './seed.ts';
 import { agentRoomView, supervisorRoomView } from './views.ts';
 import type { AgentRoomView, SupervisorRoomView } from './views.ts';
@@ -106,6 +113,11 @@ export interface SubmitWorkResult {
   submissionId: string | null;
   message: string;
   nextStep: string;
+  /**
+   * Files this agent changed without ever claiming them. Advisory here — the
+   * merge gate is what refuses them (Q1). Surfaced now so it is visible.
+   */
+  unclaimed?: string[];
 }
 
 type EmitFn = (event: Omit<RoomEvent, 'seq' | 'at'>) => void;
@@ -473,10 +485,17 @@ export class RoomService {
         taskId: task.id
       });
 
+      const stray = unclaimedChanges(room.claims, filesChanged, agentId);
+
       return {
         task,
         submissionId: submission.id,
-        message: `Submitted "${task.id}" as ${input.outcome}.`,
+        ...(stray.length > 0 ? { unclaimed: stray } : {}),
+        message:
+          stray.length > 0
+            ? `Submitted "${task.id}" as ${input.outcome}. ${stray.length} file(s) were changed ` +
+              'without being claimed first; the merge gate will refuse those.'
+            : `Submitted "${task.id}" as ${input.outcome}.`,
         nextStep:
           input.outcome === 'blocked'
             ? 'The human has been told you are blocked. Wait to be unblocked or redirected.'
@@ -741,7 +760,8 @@ export class RoomService {
         pausedReason: null,
         status: { state: 'idle', taskId: null, note: '', updatedAt: at },
         joinedAt: at,
-        lastSeenAt: null
+        lastSeenAt: null,
+        latestTouchAt: null
       };
       room.agents.push(created);
       if (options.role === 'lead') room.lead = id;
@@ -1027,7 +1047,8 @@ export class RoomService {
         pausedReason: null,
         status: { state: 'idle', taskId: null, note: '', updatedAt: nowIso() },
         joinedAt: room.createdAt,
-        lastSeenAt: nowIso()
+        lastSeenAt: nowIso(),
+        latestTouchAt: null
       };
       const thread = this.resolveThread(room, humanAgent, task, input);
       const at = nowIso();
@@ -1085,6 +1106,199 @@ export class RoomService {
       });
       return decision;
     });
+  }
+
+  // ---------------------------------------------------------------- claims
+
+  /**
+   * Take a file before writing to it (Q2). Answers instantly: granted, handed
+   * over from someone who had moved on, or refused because two agents are in
+   * the same code right now — which is a planning problem, so it goes up.
+   */
+  async claimFile(
+    agentId: string,
+    input: { path: string; laneId: string; statusNote?: string }
+  ): Promise<{ claim: Claim; outcome: string; message: string; holding: number }> {
+    const result = await this.apply<
+      | { collision: { path: string; heldBy: string } }
+      | { claim: Claim; outcome: string; message: string; holding: number }
+    >((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+
+      const now = Date.now();
+      this.sweepAbandoned(room, now, emit);
+
+      const outcome = requestClaim({
+        claims: room.claims,
+        path: input.path,
+        agentId,
+        laneId: input.laneId,
+        activity: this.activity(room),
+        now
+      });
+
+      // A refusal must not swallow the escalation. Throwing here would roll the
+      // whole mutation back, taking the collision event with it — so the
+      // mutation commits the event and the caller raises the error afterwards.
+      if (outcome.kind === 'collision') {
+        emit({
+          type: 'claim.collision',
+          actor: agentId,
+          taskId: input.laneId,
+          threadId: null,
+          summary:
+            `${agent.displayName} and ${outcome.heldBy} both need "${outcome.claim.path}" ` +
+            'right now. The split put two agents in the same code.',
+          audience: unique([HUMAN_ID, outcome.heldBy])
+        });
+        this.touchStatus(agent, emit, {
+          note: input.statusNote,
+          state: 'blocked',
+          taskId: input.laneId
+        });
+        return { collision: { path: outcome.claim.path, heldBy: outcome.heldBy } };
+      }
+
+      // Claiming is touching: it is how an agent says it is still on a file.
+      agent.latestTouchAt = new Date(now).toISOString();
+      room.claims = room.claims.filter((claim) => claim.path !== outcome.claim.path);
+      room.claims.push(outcome.claim);
+
+      if (outcome.kind === 'taken') {
+        emit({
+          type: 'claim.taken',
+          actor: agentId,
+          taskId: input.laneId,
+          threadId: null,
+          summary:
+            `${agent.displayName} took "${outcome.claim.path}" from ${outcome.previousHolder}, ` +
+            'which had moved on.',
+          audience: [outcome.previousHolder]
+        });
+      } else if (outcome.kind === 'granted') {
+        emit({
+          type: 'claim.granted',
+          actor: agentId,
+          taskId: input.laneId,
+          threadId: null,
+          summary: `${agent.displayName} took "${outcome.claim.path}".`,
+          audience: []
+        });
+      }
+
+      this.touchStatus(agent, emit, {
+        note: input.statusNote,
+        state: 'working',
+        taskId: input.laneId
+      });
+
+      const holding = room.claims.filter((claim) => claim.holder === agentId).length;
+      const message =
+        outcome.kind === 'taken'
+          ? `"${outcome.claim.path}" is yours. ${outcome.previousHolder} had moved on and has been told.`
+          : outcome.kind === 'refreshed'
+            ? `Still yours. ${holding} file(s) in hand.`
+            : `"${outcome.claim.path}" is yours. ${holding} file(s) in hand.`;
+
+      return { claim: outcome.claim, outcome: outcome.kind, message, holding };
+    });
+
+    if ('collision' in result) {
+      throw new AgoraError(
+        'LIVE_COLLISION',
+        `"${result.collision.path}" is being written by ${result.collision.heldBy} right now.`,
+        'Work on something else in your lane. A human has been asked, because two agents ' +
+          'needing one file at the same moment means the split is wrong, not that you are.',
+        { path: result.collision.path, heldBy: result.collision.heldBy }
+      );
+    }
+    return result;
+  }
+
+  /** Hand files back. Always safe, always cheap — the opposite of hoarding. */
+  async releaseFile(
+    agentId: string,
+    input: { paths: string[]; statusNote?: string }
+  ): Promise<{ released: string[]; holding: number; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+
+      const wanted = new Set(input.paths.map(normalizePath));
+      const released = room.claims
+        .filter((claim) => claim.holder === agentId && wanted.has(claim.path))
+        .map((claim) => claim.path);
+      room.claims = room.claims.filter(
+        (claim) => !(claim.holder === agentId && wanted.has(claim.path))
+      );
+
+      if (released.length > 0) {
+        emit({
+          type: 'claim.released',
+          actor: agentId,
+          taskId: agent.status.taskId,
+          threadId: null,
+          summary: `${agent.displayName} let go of ${released.join(', ')}.`,
+          audience: []
+        });
+      }
+      this.touchStatus(agent, emit, { note: input.statusNote });
+
+      const holding = room.claims.filter((claim) => claim.holder === agentId).length;
+      return {
+        released,
+        holding,
+        message:
+          released.length === 0
+            ? 'You were not holding any of those.'
+            : `Released ${released.length} file(s). ${holding} still in hand.`
+      };
+    });
+  }
+
+  /** What an agent holds right now, each with its state resolved. */
+  heldBy(agentId: string): { claim: Claim; state: ClaimState }[] {
+    return this.store.read((data) =>
+      claimsHeldBy(data.room.claims, agentId, this.activity(data.room), Date.now())
+    );
+  }
+
+  /** Files an agent changed without ever claiming them. The gate's backstop. */
+  strayChanges(agentId: string, filesChanged: readonly string[]): string[] {
+    return this.store.read((data) => unclaimedChanges(data.room.claims, filesChanged, agentId));
+  }
+
+  private activity(room: Room): Record<string, ClaimHolderActivity> {
+    const map: Record<string, ClaimHolderActivity> = {};
+    for (const agent of room.agents) {
+      map[agent.id] = {
+        latestTouchAt: agent.latestTouchAt ?? agent.joinedAt,
+        lastSeenAt: agent.lastSeenAt
+      };
+    }
+    return map;
+  }
+
+  /** A session that stopped heartbeating does not get to keep its files. */
+  private sweepAbandoned(room: Room, now: number, emit: EmitFn): void {
+    const dropped = abandonedClaims(room.claims, this.activity(room), now);
+    if (dropped.length === 0) return;
+    const droppedPaths = new Set(dropped.map((claim) => claim.path));
+    room.claims = room.claims.filter((claim) => !droppedPaths.has(claim.path));
+    for (const claim of dropped) {
+      emit({
+        type: 'claim.swept',
+        actor: HUMAN_ID,
+        taskId: claim.laneId,
+        threadId: null,
+        summary: `"${claim.path}" was let go: ${claim.holder} stopped answering.`,
+        audience: [claim.holder]
+      });
+    }
   }
 
   // ------------------------------------------------------------- internals

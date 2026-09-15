@@ -8,6 +8,7 @@ export type AgoraErrorCode =
   | 'NOT_OWNER'
   | 'OUT_OF_SCOPE'
   | 'BUDGET_EXHAUSTED'
+  | 'LIVE_COLLISION'
   | 'INVALID'
   | 'NOT_LEAD';
 
