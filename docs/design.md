@@ -240,7 +240,7 @@ exercised.
 - [ ] That line *read from GitHub* rather than set by hand (Q16)
 - [x] Editing the risk list from the dashboard (Q13) — the list itself landed in Phase 2
 - [x] Cost with its provenance attached, and never a total (Q15)
-- [ ] Metered cost proper, which needs Agora to broker the calls (Q15)
+- [x] Metered cost proper, which needs Agora to broker the calls (Q15) — landed in Phase 4
 - [x] Sortable table across lanes (Q19)
 - [x] Room close and archive; contracts seed the next room (Q24)
 - [x] Day-one flow with zero configuration (Q25)
@@ -282,18 +282,65 @@ a person before it runs out mid-lane, because that is the one that actually stop
 **What the open boxes mean.** *Permissions mirrored from GitHub*: the line is built and enforced on
 every action; which side of it a person is on is set when they are added rather than read from the
 GitHub API. That is the same unbuilt shell as Phase 1 — credentials and a public endpoint, not more
-design. *Metered cost*: the shape is there and the tool reports through it, but "metered" means
-Agora brokered the call and counted it, and Agora does not broker anyone's calls. It is left
-labelled and empty rather than filled with a plausible number.
+design. *Metered cost* was the second open box here and is now closed: Phase 4 built the
+broker, so an agent on an API key produces figures Agora counted itself.
 
 ### Phase 4 — scale
 
-- Multi-repo rooms with ordered landing (Q17)
-- Repetitive work, if the need shows up (Q19)
-- Agora brokering calls, which is the only thing that makes "metered" real (Q15)
+- [x] Multi-repo rooms with ordered landing (Q17)
+- [x] Agora brokering calls, which is the only thing that makes "metered" real (Q15)
+- [ ] Repetitive work — deliberately still parked (Q19)
 
 **Passes when** a front-end and a back-end repo ship one contract together, and the failure case is
-loud rather than half-landed and quiet.
+loud rather than half-landed and quiet. — **passing**, in `test/phase4.test.ts`, against two real
+git repositories.
+
+**Metered cost also came off Phase 3's open list here**, so that box is now closed there too.
+
+**What Agora refuses to promise (Q17).** Two merges into two repositories cannot be atomic. No
+amount of machinery makes them so, and a system that implied otherwise would be lying in the one
+place it matters most. So the offer is three specific things instead:
+
+*Order.* The side the other would be broken without goes first. The plan states it, and a plan
+containing a cross-repo contract that does not state it is refused — approving it would be
+promising "they land together" when that cannot be kept. The order is a topological sort of the
+contract graph, so a cycle says so rather than picking arbitrarily.
+
+*Blast radius.* Before anything moves, `agora land --dry-run` prints the merges in order, why each
+one is where it is, and the window: *after step 1, api is on the new POST /quote and web is not.
+That window is open until step 2 lands. Nothing rolls this back for you.*
+
+*A loud failure.* The gate refuses a conflict it can see coming, so the usual case is that nothing
+moves at all. The dangerous case is the race it cannot see: it checks, starts, lands the API, and
+somebody pushes to the web repository's base branch before it gets there. Then one repository has
+the change and the other does not. The room goes **red** and stays red — in the room status, in the
+log, in the Ledger, in a merge-rights question with three real answers, and as the loudest thing on
+the dashboard. It cannot close while red. `agora land --resume` finishes it; `agora land
+--rollback` puts the landed half back with a revert commit in each repository, never a force push,
+because somebody has that history checked out.
+
+The acceptance test arranges that race on purpose, through a hook the gate exposes between steps —
+the same hook the CLI uses to print progress. Removing the half-landing record, the red status, the
+landing order, or swapping the revert for a reset each fails it.
+
+**Metered, earned rather than claimed (Q15).** An agent on an API key can point its provider base
+URL at `/broker/<provider>`. Agora forwards the call with its own key, reads the token counts off
+the response, and records them as *metered* — the one provenance in this system that means "we
+counted this ourselves". It converts to money only where a price is configured, and otherwise
+reports tokens and stops, because a plausible dollar figure with no price behind it is exactly what
+Q15 refuses to print. It reads Anthropic-shaped and OpenAI-shaped usage, infers nothing from a
+total (input and output do not cost the same), and every call spends an action — a runaway loop
+through a paid API is precisely what the cap exists to stop.
+
+It is narrow on purpose. An agent on a subscription should not use it: that agent already has a
+billing relationship, and routing it through here would bill the work twice — which is the founding
+reason Agora is a place agents connect *to* rather than something that drives them.
+
+**Why the last box is still open.** Q19 parked the grid with a condition attached: *if the need
+shows up*. Four phases in, it has not. Nothing built since has wanted to express itself as forty
+rows of the same check, and the Ledger — which is what Q19 actually asked for — has carried every
+view a person has needed. Building it now would be building against a guess rather than a need, so
+it stays parked, with the condition intact.
 
 ## The bet, stated plainly
 

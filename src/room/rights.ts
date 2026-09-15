@@ -25,6 +25,7 @@ export type RoomAction =
   | 'set-goal'
   | 'record-decision'
   | 'close-room'
+  | 'clear-red'
   | 'mint-merge-token'
   // Undone by the next person who looks. Open to everyone in the room.
   | 'pause-agent'
@@ -32,6 +33,7 @@ export type RoomAction =
   | 'add-agent'
   | 'set-agent-scope'
   | 'assign-lane'
+  | 'add-repo'
   | 'add-human'
   | 'name-lane-owner'
   | 'post-message'
@@ -54,6 +56,7 @@ const ACTIONS: Record<RoomAction, { merge: boolean; what: string }> = {
   'set-goal': { merge: true, what: 'changing the room’s goal' },
   'record-decision': { merge: true, what: 'recording a room decision' },
   'close-room': { merge: true, what: 'closing the room' },
+  'clear-red': { merge: true, what: 'declaring a half-landed change settled' },
   'mint-merge-token': { merge: true, what: 'handing out merge rights' },
 
   'pause-agent': { merge: false, what: 'pausing an agent' },
@@ -61,6 +64,7 @@ const ACTIONS: Record<RoomAction, { merge: boolean; what: string }> = {
   'add-agent': { merge: false, what: 'adding an agent' },
   'set-agent-scope': { merge: false, what: 'narrowing what an agent may claim' },
   'assign-lane': { merge: false, what: 'handing a lane to another agent' },
+  'add-repo': { merge: false, what: 'adding a repository to the room' },
   'add-human': { merge: false, what: 'inviting someone into the room' },
   'name-lane-owner': { merge: false, what: 'naming who answers for a lane' },
   'post-message': { merge: false, what: 'answering an agent' },

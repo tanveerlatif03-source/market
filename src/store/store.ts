@@ -27,6 +27,8 @@ function hydrate(data: AgoraData): AgoraData {
   room.closedBy ??= null;
   room.closeNote ??= null;
   room.seededFrom ??= null;
+  room.repos ??= [];
+  room.partialLanding ??= null;
   room.riskList ??= DEFAULT_RISK_LIST.map((rule) => ({ ...rule, paths: [...rule.paths] }));
   return data;
 }

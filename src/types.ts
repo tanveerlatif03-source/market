@@ -3,6 +3,7 @@ import type { AttentionItem } from './room/attention.ts';
 import type { StuckProbe } from './room/spin.ts';
 import type { Review, RiskRule, RiskSignOff } from './room/review.ts';
 import type { CostEntry } from './room/cost.ts';
+import type { RoomRepo, PartialLanding } from './room/repos.ts';
 
 export type { Claim, ClaimState, ClaimHolderActivity } from './room/claims.ts';
 export type { AttentionItem, AttentionKind, AttentionOption, AttentionQueue } from './room/attention.ts';
@@ -20,6 +21,12 @@ export type { CostEntry, CostProvenance, CostReport } from './room/cost.ts';
 export type { RoomAction, RightsVerdict } from './room/rights.ts';
 export type { LedgerRow, LedgerColumn, LedgerSort } from './room/ledger.ts';
 export type { CloseReadiness, RoomArchive, SeedContract } from './room/close.ts';
+export type {
+  RoomRepo,
+  PartialLanding,
+  LandingStep,
+  LandingPlan
+} from './room/repos.ts';
 
 /**
  * Agora domain types.
@@ -113,6 +120,13 @@ export interface SeamSide {
 export interface Seam {
   betweenTasks: [string, string];
   contract: SeamSide[];
+  /**
+   * Which side has to be in place first (Q17). A cross-repo contract cannot
+   * land atomically, so the one thing on offer is the order — the side the
+   * other would be broken without goes first. Null only when both sides live
+   * in the same repository, where they land as one merge set.
+   */
+  landFirst: string | null;
 }
 
 /** Room-wide and visible to everyone, including agents that join late. */
@@ -173,6 +187,8 @@ export interface Task {
   /** Who the lead proposed for this lane. Advisory: ownership still has to be claimed. */
   suggestedOwner: string | null;
   status: TaskStatus;
+  /** Which repository this lane's paths live in (Q17). Null in a one-repo room. */
+  repoId: string | null;
   /** This task's lane: the paths it owns. */
   paths: string[];
   /** Ids of the seam decisions this task must build toward. */
@@ -277,6 +293,12 @@ export type RoomEventType =
   | 'risk.signed'
   | 'lane.landed'
   | 'cost.reported'
+  | 'cost.metered'
+  | 'repo.added'
+  | 'landing.started'
+  | 'landing.partial'
+  | 'landing.recovered'
+  | 'landing.rolledback'
   | 'room.closed'
   | 'room.seeded'
   | 'rights.refused';
@@ -294,7 +316,12 @@ export interface RoomEvent {
   audience: string[];
 }
 
-export type RoomStatus = 'open' | 'closed';
+/**
+ * `red` is Q17's half-landed state: one repo has the change and another does
+ * not. The room stays open and red until both halves are in, because the one
+ * thing worse than a slow cross-repo landing is a quiet one.
+ */
+export type RoomStatus = 'open' | 'red' | 'closed';
 
 export interface Room {
   id: string;
@@ -309,6 +336,10 @@ export interface Room {
   closeNote: string | null;
   /** The archive whose contracts this room started from, if any (Q24). */
   seededFrom: string | null;
+  /** The repositories this room touches (Q17). One is the common case. */
+  repos: RoomRepo[];
+  /** Set when a landing got half in. The room is red until this clears (Q17). */
+  partialLanding: PartialLanding | null;
   /** One agent is lead for the room: it proposes the split, the human approves. */
   lead: string | null;
   plan: Plan;

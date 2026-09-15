@@ -188,6 +188,18 @@ select.btn { padding-right: 8px; }
 .rows > * + * { border-top: 1px solid var(--hairline); }
 .row { padding: 14px 0; }
 
+/* -------------------------------------------------------------------- red */
+/* Q17: a half-landed contract is the worst state this system can produce, so
+   it is the loudest thing on the page and does not scroll away. */
+.red {
+  background: color-mix(in oklab, var(--bad) 12%, var(--surface));
+  border: 1px solid color-mix(in oklab, var(--bad) 45%, transparent);
+}
+.red .card__title { color: var(--bad); }
+.red__detail { font-size: 13px; line-height: 1.55; }
+.red__what { margin-top: 10px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+.red__actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
 /* ----------------------------------------------------------------- ledger */
 .ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ledger th, .ledger td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -416,6 +428,17 @@ select.btn { padding-right: 8px; }
   </header>
 
   <main class="wrap">
+    <section id="red" class="card red hide">
+      <div class="card__head"><h2 class="card__title">This room is red</h2></div>
+      <div class="card__body">
+        <div id="red-detail" class="red__detail"></div>
+        <div id="red-what" class="red__what"></div>
+        <div class="red__actions">
+          <span class="red__detail">Finish it or put it back — <code>agora land --resume</code> / <code>agora land --rollback</code>.</span>
+        </div>
+      </div>
+    </section>
+
     <section id="attention" class="card attention hide">
       <div class="card__head"><h2 class="card__title">Needs you</h2></div>
       <div class="card__body">
@@ -921,7 +944,11 @@ select.btn { padding-right: 8px; }
     $("room-goal").textContent = room.goal;
 
     var chip = $("plan-chip");
-    if (room.status === "closed") {
+    if (room.status === "red") {
+      chip.className = "chip chip--bad";
+      chip.textContent = "RED · half-landed";
+      chip.title = "A change is in one repository and not another.";
+    } else if (room.status === "closed") {
       chip.className = "chip";
       chip.textContent = "closed · " + (room.closedBy || "someone");
       chip.title = room.closeNote || "This room is finished.";
@@ -929,6 +956,21 @@ select.btn { padding-right: 8px; }
       chip.className = "chip " + (PLAN_TONE[room.plan.status] || "");
       chip.textContent = "plan · " + room.plan.status;
       chip.title = "";
+    }
+
+    // Q17: one repository has a change another does not. Nothing about this is
+    // allowed to be quiet, so it sits above everything else.
+    var partial = room.partialLanding;
+    $("red").classList.toggle("hide", room.status !== "red" || !partial);
+    if (partial) {
+      var ahead = partial.landed.map(function (step) { return step.repoId; }).join(", ");
+      var behind = partial.pending.map(function (step) { return step.repoId; }).join(", ");
+      $("red-detail").textContent =
+        ahead + " has this change and " + behind + " does not. " + partial.reason +
+        " Until that is fixed, the two sides of a contract disagree in production.";
+      $("red-what").textContent =
+        "lane " + partial.laneId +
+        (partial.conflicts.length ? "  ·  conflicts: " + partial.conflicts.join(", ") : "");
     }
 
     $("attention").classList.toggle("hide", view.attention.length === 0);

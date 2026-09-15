@@ -2,6 +2,7 @@ import { nowIso, shortId } from '../ids.ts';
 import { DEFAULT_RISK_LIST } from './review.ts';
 import { seedBriefing } from './close.ts';
 import type { SeedContract } from './close.ts';
+import type { RoomRepo } from './repos.ts';
 import type { AgoraData, Human, Room, Task } from '../types.ts';
 
 /**
@@ -35,6 +36,7 @@ function planTask(at: string, briefing: string): Task {
     owner: null,
     suggestedOwner: null,
     status: 'open',
+    repoId: null,
     paths: [],
     seams: [],
     laneOwner: null,
@@ -59,6 +61,8 @@ export interface CreateRoomOptions {
   seededContracts?: readonly SeedContract[];
   /** The archive they came from, for the record. */
   seededFrom?: string | null;
+  /** The repositories this room touches (Q17). One is the common case. */
+  repos?: readonly Omit<RoomRepo, 'addedAt'>[];
 }
 
 export function createRoom(options: CreateRoomOptions): Room {
@@ -84,6 +88,8 @@ export function createRoom(options: CreateRoomOptions): Room {
     closedBy: null,
     closeNote: null,
     seededFrom: options.seededFrom ?? null,
+    repos: (options.repos ?? []).map((repo) => ({ ...repo, addedAt: at })),
+    partialLanding: null,
     lead: null,
     plan: {
       status: 'none',

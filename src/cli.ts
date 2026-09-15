@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { access, readFile, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { EventBus } from './events.ts';
 import { AgoraStore } from './store/store.ts';
@@ -10,6 +11,10 @@ import type { RoomArchive } from './room/close.ts';
 import { summarizeCost } from './room/cost.ts';
 import type { LedgerColumn } from './room/ledger.ts';
 import { createAgoraServer } from './http/server.ts';
+import { providersFromEnv } from './broker/broker.ts';
+import { MergeGate } from './gate/gate.ts';
+import { summarize } from './gate/evaluate.ts';
+import { openRepo } from './git/repo.ts';
 import { loadConfig } from './config.ts';
 import { isAgoraError } from './errors.ts';
 
@@ -25,7 +30,14 @@ Usage:
   agora status                                Print the board.
   agora ledger [--sort <column>] [--desc]     Every lane on one screen, worst first.
   agora why --file|--lane|--contract <x>      Why is this the way it is.
+  agora repo add --id <id> --root <path>      Add a repository to the room.
+  agora land <lane> [--dry-run]               Land a lane and everything it shares a contract with.
   agora close [--landed <a,b>] [--note <n>]   Close the room and write its archive.
+
+Options for "land":
+  --dry-run            Say what would happen, in order, and change nothing.
+  --resume             Finish a landing that got half in.
+  --rollback           Revert what landed, with a revert commit in each repository.
 
 Options everywhere:
   --as <id>            Who is doing this. Defaults to "owner", who opened the room.
@@ -43,6 +55,9 @@ Options for "agent add":
 
 Environment:
   AGORA_DIR           Where the room is stored (default ./.agora)
+  AGORA_BROKER_<X>_URL, _KEY, _AUTH, _HEADERS, _PRICES
+                      Broker calls to provider <X> so its spend is metered exactly.
+                      Only for agents on an API key — a subscription would bill twice.
   AGORA_HOST          Bind host (default 127.0.0.1)
   AGORA_PORT          Bind port (default 8787)
   AGORA_ALLOWED_HOSTS Comma-separated Host values to accept, enabling DNS rebinding protection.
@@ -313,6 +328,118 @@ async function cmdWhy(argv: string[]): Promise<void> {
   }
 }
 
+/** A room is a unit of work, and work does not stop at a repo boundary (Q17). */
+async function cmdRepoAdd(argv: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      id: { type: 'string' },
+      name: { type: 'string' },
+      root: { type: 'string' },
+      base: { type: 'string' },
+      as: { type: 'string' }
+    }
+  });
+  if (values.id === undefined) throw new Error('--id is required, e.g. --id web');
+  const service = await openService();
+  const repo = await service.addRepo(values.as ?? OWNER_ID, {
+    id: values.id,
+    ...(values.name !== undefined ? { name: values.name } : {}),
+    root: resolve(values.root ?? process.cwd()),
+    ...(values.base !== undefined ? { baseBranch: values.base } : {})
+  });
+  console.log(`"${repo.name}" is in the room: ${repo.root} on ${repo.baseBranch}.`);
+  if (service.repos().length > 1) {
+    console.log(
+      '\nThis room now spans repositories. Two merges cannot be atomic, so every contract\n' +
+        'crossing them has to say which side lands first — the plan will be refused without it.'
+    );
+  }
+}
+
+/**
+ * Landing, from the command line (Q1, Q17). `--dry-run` is the interesting one:
+ * it prints the blast radius before anything moves.
+ */
+async function cmdLand(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      'dry-run': { type: 'boolean' },
+      resume: { type: 'boolean' },
+      rollback: { type: 'boolean' },
+      as: { type: 'string' }
+    },
+    allowPositionals: true
+  });
+  const service = await openService();
+  const room = service.snapshot();
+  const gate = new MergeGate(service, {
+    ...(room.repos.length === 0 ? { repo: openRepo(process.cwd()) } : {}),
+    onStep: (step, index, total) => {
+      console.log(`  [${index + 1}/${total}] merging ${step.laneId} into ${step.repoName}/${step.baseBranch}...`);
+    }
+  });
+
+  if (values.rollback === true) {
+    const outcome = await gate.rollback(values.as ?? OWNER_ID);
+    if (outcome.reverted.length === 0 && outcome.failed.length === 0) {
+      console.log('Nothing to roll back — this room is not red.');
+      return;
+    }
+    console.log(`Reverted in ${outcome.reverted.join(', ') || 'nothing'}.`);
+    if (outcome.failed.length > 0) {
+      console.log(`Could not revert in ${outcome.failed.join(', ')}. The room stays red.`);
+      process.exitCode = 1;
+    } else {
+      console.log('Nothing shipped half. The room is open again.');
+    }
+    return;
+  }
+
+  if (values.resume === true) {
+    const outcome = await gate.resume();
+    if (outcome === null) {
+      console.log('Nothing to resume — this room is not red.');
+      return;
+    }
+    console.log(outcome.summary);
+    if (outcome.verdict !== 'merge') process.exitCode = 1;
+    else await service.clearPartialLanding(values.as ?? OWNER_ID, { how: 'finished' });
+    return;
+  }
+
+  const laneId = positionals[0];
+  if (laneId === undefined) throw new Error('Which lane? agora land <lane> [--dry-run]');
+
+  const plan = gate.landingPlan(laneId);
+  console.log(plan.summary);
+  for (const step of plan.steps) {
+    console.log(`  ${step.order}. ${step.laneId} -> ${step.repoName}/${step.baseBranch}`);
+    console.log(`     ${step.because}`);
+  }
+  if (plan.windows.length > 0) {
+    console.log('\nWhile this happens:');
+    for (const window of plan.windows) console.log(`  - ${window}`);
+  }
+
+  if (values['dry-run'] === true) {
+    const decision = await gate.evaluate(laneId);
+    console.log(`\nThe gate says: ${summarize(decision, laneId)}`);
+    for (const reason of decision.reasons) console.log(`  - ${reason.detail}`);
+    return;
+  }
+
+  const outcome = await gate.land(laneId);
+  console.log(`\n${outcome.summary}`);
+  for (const reason of outcome.decision.reasons) console.log(`  - ${reason.detail}`);
+  if (outcome.partial) {
+    console.log('\nTHE ROOM IS RED. Finish it with "agora land --resume", or put it back with');
+    console.log('"agora land --rollback". Leaving it is the one thing that is not an option.');
+  }
+  if (outcome.verdict !== 'merge') process.exitCode = 1;
+}
+
 /** A room is a unit of work that ends (Q24). */
 async function cmdClose(argv: string[]): Promise<void> {
   const { values } = parseArgs({
@@ -370,10 +497,12 @@ async function cmdServe(argv: string[]): Promise<void> {
     ...(values.port !== undefined ? { port: Number(values.port) } : {})
   });
   const service = await openService();
+  const brokers = providersFromEnv();
   const server = createAgoraServer(service, {
     host: config.host,
     port: config.port,
-    allowedHosts: config.allowedHosts
+    allowedHosts: config.allowedHosts,
+    brokers
   });
   const address = await server.listen();
   const room = service.snapshot();
@@ -381,7 +510,24 @@ async function cmdServe(argv: string[]): Promise<void> {
   console.log(`Agora room "${room.name}" is open.`);
   console.log(`  agents      http://${address.host}:${address.port}/mcp`);
   console.log(`  supervisor  http://${address.host}:${address.port}/`);
+  if (brokers.length > 0) {
+    console.log(
+      `  broker      http://${address.host}:${address.port}/broker/<provider>  ` +
+        `(${brokers.map((broker) => broker.id).join(', ')})`
+    );
+    console.log(
+      '              Point an API-key agent here and its spend is metered exactly.\n' +
+        '              An agent on a subscription should not use this: it would bill twice.'
+    );
+  }
   console.log(`  agents in the room: ${room.agents.map((agent) => agent.id).join(', ') || 'none yet'}`);
+  if (room.repos.length > 1) {
+    console.log(`  repositories: ${room.repos.map((repo) => `${repo.id} (${repo.baseBranch})`).join(', ')}`);
+  }
+  if (room.status === 'red') {
+    console.log('\n  THE ROOM IS RED. A change landed in one repository and not another.');
+    console.log('  Run "agora land --resume" or "agora land --rollback".');
+  }
 
   const shutdown = (): void => {
     void server.close().then(() => process.exit(0));
@@ -427,6 +573,13 @@ async function main(): Promise<void> {
     case 'people':
       if (subcommand !== 'add') throw new Error('Unknown command. Try "agora people add".');
       await cmdPeopleAdd(rest);
+      return;
+    case 'repo':
+      if (subcommand !== 'add') throw new Error('Unknown command. Try "agora repo add".');
+      await cmdRepoAdd(rest);
+      return;
+    case 'land':
+      await cmdLand([subcommand, ...rest].filter((value): value is string => value !== undefined));
       return;
     case 'ledger':
       await cmdLedger([subcommand, ...rest].filter((value): value is string => value !== undefined));

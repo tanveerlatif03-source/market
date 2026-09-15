@@ -30,11 +30,14 @@ import type { Review, ReviewRequirement, ReviewVerdict, RiskRule } from './revie
 import { provenanceOf } from './provenance.ts';
 import type { Provenance, ProvenanceSubject } from './provenance.ts';
 import { costReport, quotaWarnings } from './cost.ts';
+import type { BrokerUsage } from '../broker/broker.ts';
 import type { CostEntry, CostProvenance, CostReport } from './cost.ts';
 import { DEFAULT_SORT, ledgerRows, sortRows } from './ledger.ts';
 import type { LedgerRow, LedgerSort } from './ledger.ts';
 import { archiveOf, closeReadiness } from './close.ts';
 import type { CloseReadiness, RoomArchive } from './close.ts';
+import { contractsMissingOrder, partialLandingSummary, repoOf } from './repos.ts';
+import type { PartialLanding, RoomRepo } from './repos.ts';
 import type {
   Dissent,
   Human,
@@ -92,6 +95,8 @@ export interface PlanProposalTask {
   key: string;
   title: string;
   description?: string;
+  /** Which repository these paths are in (Q17). Omitted in a one-repo room. */
+  repo?: string;
   paths: string[];
   suggestedOwner?: string;
   actionBudget?: number;
@@ -104,6 +109,12 @@ export interface PlanProposalSeam {
   body: string;
   /** The two task keys whose pieces touch. */
   between: [string, string];
+  /**
+   * Which side has to be in place first (Q17). Required when the two sides are
+   * in different repositories, because those cannot land atomically and the
+   * order is the only thing Agora can actually promise.
+   */
+  landFirst?: string;
   contract: { task: string; provides: string; expects: string }[];
 }
 
@@ -660,6 +671,7 @@ export class RoomService {
         owner: null,
         suggestedOwner: proposed.suggestedOwner ?? null,
         status: 'draft',
+        repoId: this.repoIdFor(room, proposed.repo),
         paths: proposed.paths.map(normalizePath),
         seams: [],
         laneOwner: null,
@@ -696,6 +708,7 @@ export class RoomService {
         body: seam.body,
         seam: {
           betweenTasks: [left, right],
+          landFirst: seam.landFirst === undefined ? null : (idByKey.get(seam.landFirst) ?? null),
           contract: seam.contract.map((side) => ({
             taskId: idByKey.get(side.task) as string,
             provides: side.provides,
@@ -930,6 +943,22 @@ export class RoomService {
           'Wait for the lead to propose a split.'
         );
       }
+      // A cross-repo contract with no stated order is a promise Agora cannot
+      // keep: those two merges will not be atomic, so somebody has to say which
+      // side goes first (Q17).
+      const unordered = contractsMissingOrder(room);
+      if (unordered.length > 0) {
+        throw new AgoraError(
+          'INVALID',
+          `These contracts cross repositories without saying which side lands first: ${unordered
+            .map((entry) => `"${entry.title}"`)
+            .join(', ')}.`,
+          'Two repositories cannot be merged atomically. Ask the lead to name the side the other ' +
+            'would be broken without, and it goes first.',
+          { contracts: unordered }
+        );
+      }
+
       const naked = this.lanesWithoutEvidence(room);
       if (naked.length > 0) {
         throw new AgoraError(
@@ -2221,6 +2250,156 @@ export class RoomService {
     });
   }
 
+  // ------------------------------------------------------ repositories (Q17)
+
+  /**
+   * Adds a repository to the room. Agora holds a working copy and the branch in
+   * each one, because a room is a unit of work and work does not stop at a
+   * repository boundary.
+   */
+  async addRepo(
+    by: string,
+    input: { id: string; name?: string; root: string; baseBranch?: string }
+  ): Promise<RoomRepo> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const human = this.requireRight(room, by, 'add-repo', emit);
+      const id = slugify(input.id, 'repo');
+      if (room.repos.some((repo) => repo.id === id)) {
+        throw new AgoraError('INVALID', `"${id}" is already in this room.`, 'Pick another id.');
+      }
+      const repo: RoomRepo = {
+        id,
+        name: input.name ?? id,
+        root: input.root,
+        baseBranch: input.baseBranch ?? 'main',
+        addedAt: nowIso()
+      };
+      room.repos.push(repo);
+      emit({
+        type: 'repo.added',
+        actor: human.id,
+        taskId: null,
+        threadId: null,
+        summary:
+          `${human.displayName} added the repository "${repo.name}" (${repo.baseBranch}).` +
+          (room.repos.length > 1
+            ? ' Contracts crossing repositories now need a stated landing order.'
+            : ''),
+        audience: []
+      });
+      return repo;
+    });
+  }
+
+  repos(): RoomRepo[] {
+    return this.store.read((data) => data.room.repos);
+  }
+
+  /** Which repository a lane's paths live in. */
+  repoFor(laneId: string): RoomRepo | undefined {
+    return this.store.read((data) =>
+      repoOf(data.room, data.room.tasks.find((task) => task.id === laneId))
+    );
+  }
+
+  private repoIdFor(room: Room, wanted: string | undefined): string | null {
+    if (wanted === undefined) return null;
+    const id = slugify(wanted, 'repo');
+    if (!room.repos.some((repo) => repo.id === id)) {
+      throw new AgoraError(
+        'NOT_FOUND',
+        `There is no repository "${wanted}" in this room.`,
+        room.repos.length === 0
+          ? 'This room has one repository and lanes do not name it. Drop "repo" from the plan.'
+          : `Known repositories: ${room.repos.map((repo) => repo.id).join(', ')}.`,
+        { known: room.repos.map((repo) => repo.id) }
+      );
+    }
+    return id;
+  }
+
+  /**
+   * Records a landing that got half in (Q17). The room goes red and stays red:
+   * two repositories disagreeing about a contract is not a state anything is
+   * allowed to be quiet about.
+   */
+  async recordPartialLanding(
+    input: Omit<PartialLanding, 'at' | 'attentionId'>
+  ): Promise<PartialLanding> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const partial: PartialLanding = { ...input, at: nowIso(), attentionId: null };
+      const detail = partialLandingSummary(partial);
+
+      const item = this.raise(room, emit, {
+        kind: 'ruling',
+        laneId: input.laneId,
+        title: `Half-landed: ${input.landed.map((step) => step.repoId).join(', ')} is ahead`,
+        detail,
+        needsMergeRights: true,
+        options: [
+          { id: 'finish', label: 'Finish the landing', effect: 'Agora retries the repositories that did not land.' },
+          { id: 'roll-back', label: 'Undo what landed', effect: 'A revert commit goes onto each repository that did land. Nothing is force-pushed.' },
+          { id: 'leave-it', label: 'Leave it, I am on it', effect: 'The room stays red and says so until somebody clears it.' }
+        ]
+      });
+
+      partial.attentionId = item.id;
+      room.partialLanding = partial;
+      room.status = 'red';
+
+      emit({
+        type: 'landing.partial',
+        actor: HUMAN_ID,
+        taskId: input.laneId,
+        threadId: null,
+        summary: `The room is red. ${detail}`,
+        audience: [HUMAN_ID]
+      });
+      return partial;
+    });
+  }
+
+  /** Clears the red state once both halves are actually in, or both are out. */
+  async clearPartialLanding(
+    by: string,
+    input: { how: 'finished' | 'rolled-back'; note?: string }
+  ): Promise<Room> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const human = this.requireRight(room, by, 'clear-red', emit);
+      const partial = room.partialLanding;
+      if (partial === null) {
+        throw new AgoraError('INVALID', 'This room is not red.', 'Nothing to clear.');
+      }
+      room.partialLanding = null;
+      room.status = 'open';
+
+      const item = room.attention.find((candidate) => candidate.id === partial.attentionId);
+      if (item !== undefined && item.resolvedAt === null) {
+        item.resolvedAt = nowIso();
+        item.resolvedBy = human.id;
+        item.resolution =
+          input.how === 'finished' ? 'Finished the landing.' : 'Rolled back what had landed.';
+      }
+
+      emit({
+        type: input.how === 'finished' ? 'landing.recovered' : 'landing.rolledback',
+        actor: human.id,
+        taskId: partial.laneId,
+        threadId: null,
+        summary:
+          input.how === 'finished'
+            ? `${human.displayName} got the rest of "${partial.laneId}" in. The repositories agree again.`
+            : `${human.displayName} reverted "${partial.laneId}" where it had landed. Nothing shipped half.` +
+              (input.note !== undefined ? ` ${input.note}` : ''),
+        audience: []
+      });
+      return room;
+    });
+  }
+
   // --------------------------------------------------- cost, ledger, closing
 
   /**
@@ -2310,6 +2489,86 @@ export class RoomService {
       }
 
       return { entry, report, warnings };
+    });
+  }
+
+  /**
+   * Records a call Agora made on an agent's behalf (Q15).
+   *
+   * This is the only place a `metered` figure comes from, because it is the
+   * only place Agora did the counting. The action is charged whether or not the
+   * provider answered: a loop of failures is still a loop, and the cap is what
+   * stops it.
+   */
+  async recordBrokeredCall(
+    agentId: string,
+    input: {
+      laneId: string | null;
+      provider: string;
+      usage: BrokerUsage | null;
+      status: number;
+    }
+  ): Promise<{ entries: CostEntry[]; report: CostReport }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+
+      const at = nowIso();
+      const entries: CostEntry[] = [];
+      const add = (amount: number, unit: string, note: string): void => {
+        const entry: CostEntry = {
+          id: shortId('cost'),
+          laneId: input.laneId,
+          agentId,
+          provenance: 'metered',
+          amount,
+          unit,
+          limit: null,
+          note,
+          at
+        };
+        room.costs.push(entry);
+        entries.push(entry);
+      };
+
+      if (input.usage !== null) {
+        const model = input.usage.model ?? 'an unnamed model';
+        const tokens = input.usage.inputTokens + input.usage.outputTokens;
+        if (tokens > 0) add(tokens, 'tokens', `${input.provider}, ${model}`);
+        // Money only where a price was configured. A plausible figure with no
+        // price behind it would be the exact thing Q15 refuses to print.
+        if (input.usage.cents !== null) {
+          add(Math.round(input.usage.cents), 'usd-cents', `${input.provider}, ${model}`);
+        }
+      }
+
+      emit({
+        type: 'cost.metered',
+        actor: agentId,
+        taskId: input.laneId,
+        threadId: null,
+        summary:
+          input.usage === null
+            ? `${agent.displayName} made a call through ${input.provider} (${input.status}); ` +
+              'nothing countable came back.'
+            : `${agent.displayName} used ${input.usage.inputTokens} in / ` +
+              `${input.usage.outputTokens} out via ${input.provider}` +
+              (input.usage.cents === null
+                ? '. No price is configured, so this is tokens and no money.'
+                : `, ${Math.round(input.usage.cents)} cents.`),
+        audience: []
+      });
+
+      // Charged last, so the call above is recorded even when this is the one
+      // that trips the cap.
+      const lane =
+        input.laneId === null
+          ? undefined
+          : room.tasks.find((task) => task.id === input.laneId);
+      if (lane !== undefined) this.spendAction(room, lane, emit);
+
+      return { entries, report: costReport(room.costs, input.laneId) };
     });
   }
 

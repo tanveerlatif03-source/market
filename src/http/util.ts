@@ -27,7 +27,8 @@ export function sendError(res: ServerResponse, error: unknown): void {
   });
 }
 
-export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+/** The body as it arrived. The broker forwards bytes rather than re-encoding them. */
+export async function readRawBody(req: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -38,9 +39,14 @@ export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
     }
     chunks.push(buffer);
   }
-  if (size === 0) return undefined;
+  return Buffer.concat(chunks);
+}
+
+export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const raw = await readRawBody(req);
+  if (raw.length === 0) return undefined;
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return JSON.parse(raw.toString('utf8'));
   } catch {
     throw new AgoraError('INVALID', 'Request body is not valid JSON.', 'Send a JSON object.');
   }
