@@ -79,6 +79,12 @@ export function eventsVisibleTo(room: Room, agentId: string, sinceSeq: number): 
   });
 }
 
+/** Joins a sentence onto a reason that may already end in punctuation. */
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
 function canClaim(task: Task, agent: Agent, room: Room): boolean {
   if (task.status !== 'open') return false;
   if (task.id === PLAN_TASK_ID) return agent.role === 'lead';
@@ -130,7 +136,7 @@ function buildGuidance(room: Room, agent: Agent, owned: Task[], claimable: Task[
     } else if (task.status === 'submitted') {
       guidance.push(`"${task.id}" is submitted and waiting for the human to accept it.`);
     } else if (task.status === 'blocked') {
-      guidance.push(`"${task.id}" is blocked: ${task.blockedReason ?? 'no reason recorded'}.`);
+      guidance.push(`"${task.id}" is blocked: ${sentence(task.blockedReason ?? 'no reason recorded')}`);
     }
   }
 
@@ -197,7 +203,7 @@ export function attentionItems(room: Room): string[] {
       items.push(`"${task.id}" was submitted by ${task.owner ?? 'nobody'} and needs accepting.`);
     }
     if (task.status === 'blocked') {
-      items.push(`"${task.id}" is blocked: ${task.blockedReason ?? 'no reason recorded'}.`);
+      items.push(`"${task.id}" is blocked: ${sentence(task.blockedReason ?? 'no reason recorded')}`);
     }
   }
   for (const thread of room.threads) {
