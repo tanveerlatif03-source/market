@@ -26,6 +26,15 @@ export interface AgoraServerOptions {
   brokers?: readonly ProviderConfig[];
   /** Injected in tests. */
   fetchImpl?: typeof fetch;
+  /**
+   * No MCP session is kept between requests (Q1, but forced by the host).
+   *
+   * A serverless host may answer every request from a different process, so a
+   * session map in memory is a map most requests cannot see. In stateless mode
+   * each MCP call stands alone: correct, at the cost of the server being able
+   * to push — agents find out by asking rather than by being told.
+   */
+  statelessMcp?: boolean;
 }
 
 interface McpSession {
@@ -36,6 +45,8 @@ interface McpSession {
 
 export interface AgoraServer {
   server: Server;
+  /** The router on its own, for a host that owns the listening socket. */
+  handler: (req: IncomingMessage, res: ServerResponse) => void;
   listen: () => Promise<{ host: string; port: number }>;
   close: () => Promise<void>;
 }
@@ -63,6 +74,24 @@ export function createAgoraServer(service: RoomService, options: AgoraServerOpti
       return;
     }
     const agentId = principal.agentId;
+
+    if (options.statelessMcp === true) {
+      // One transport, one request, thrown away after — because on this host
+      // the next request may be a different process, so there is nowhere for a
+      // session to live. This has to come before anything looks for a session
+      // id: in stateless mode there never is one, on any request.
+      const once = createAgentMcpServer(service, agentId);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on('close', () => {
+        void transport.close();
+        once.dispose();
+      });
+      await once.server.connect(transport);
+      const body = req.method === 'POST' ? await readJsonBody(req) : undefined;
+      await transport.handleRequest(req, res, body);
+      return;
+    }
+
     const sessionId = req.headers['mcp-session-id'];
     const existing = typeof sessionId === 'string' ? sessions.get(sessionId) : undefined;
 
@@ -184,10 +213,15 @@ export function createAgoraServer(service: RoomService, options: AgoraServerOpti
     }
   }
 
-  const server = createServer((req, res) => {
+  const handler = (req: IncomingMessage, res: ServerResponse): void => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? `${host}:${port}`}`);
 
     const run = async (): Promise<void> => {
+      // When the room lives somewhere shared, this process is not the
+      // authority — so every request starts from what is stored. A token
+      // minted a second ago by another instance has to work here too.
+      await service.sync();
+
       if (url.pathname === '/healthz') {
         sendJson(res, 200, { ok: true, room: service.snapshot().id });
         return;
@@ -220,10 +254,13 @@ export function createAgoraServer(service: RoomService, options: AgoraServerOpti
       if (!res.headersSent) sendError(res, error);
       else res.end();
     });
-  });
+  };
+
+  const server = createServer(handler);
 
   return {
     server,
+    handler,
     listen: () =>
       new Promise((resolve, reject) => {
         server.once('error', reject);

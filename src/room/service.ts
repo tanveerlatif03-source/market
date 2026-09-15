@@ -228,6 +228,18 @@ export class RoomService {
     return this.bus;
   }
 
+  /**
+   * Pulls in whatever other instances have written.
+   *
+   * A room kept somewhere shared has no single authority, so anything that
+   * reads — authenticating a token, rendering the dashboard — has to start from
+   * what is actually stored rather than from what this process last saw. A room
+   * in a file has one writer and this does nothing.
+   */
+  async sync(): Promise<void> {
+    await this.store.refresh();
+  }
+
   // ---------------------------------------------------------------- identity
 
   authenticate(token: string): Principal | null {

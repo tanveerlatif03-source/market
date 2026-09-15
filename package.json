@@ -14,9 +14,12 @@
   "main": "./dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node --experimental-strip-types src/cli.ts",
+    "dev": "node --experimental-strip-types src/cli.ts serve",
+    "prepare": "tsc",
+    "start": "node dist/cli.js serve",
+    "test": "node --test --experimental-strip-types \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
-    "test": "node --test --experimental-strip-types \"test/*.test.ts\""
+    "vercel-build": "tsc && mkdir -p public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

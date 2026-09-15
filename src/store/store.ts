@@ -1,7 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { DEFAULT_RISK_LIST } from '../room/review.ts';
+import { FilePersistence, MemoryPersistence } from './persistence.ts';
+import type { Persistence } from './persistence.ts';
 import type { AgoraData } from '../types.ts';
 
 /** Events are an audit log, not an archive. Keep the tail bounded. */
@@ -34,39 +33,74 @@ function hydrate(data: AgoraData): AgoraData {
   return data;
 }
 
+/** How many times a shared write will retry before giving up and saying so. */
+const MAX_CAS_ATTEMPTS = 8;
+
 /**
- * Holds the whole room in memory and persists it as one JSON file.
+ * Holds the room and writes it somewhere durable.
  *
- * Every mutation is serialized through a promise chain and applied to a clone,
- * so a mutation that throws leaves the live room untouched.
+ * Two modes, and which one you get depends on where the room lives:
+ *
+ * **Authoritative** (a file, or memory). One process owns the room. It is held
+ * in memory, mutations are serialized through a promise chain and applied to a
+ * clone, so a mutation that throws leaves the live room untouched.
+ *
+ * **Shared** (Redis, and so anything serverless). Nobody owns the room. Each
+ * mutation loads it, applies itself to that, and writes back only if nothing
+ * else has written in between; if something has, it drops what it did and
+ * replays against the new state. The retry is the important part — without it
+ * two requests landing together would each write a room missing the other's
+ * work, and the loss would be silent.
  */
 export class AgoraStore {
   private data: AgoraData;
-  private readonly file: string | null;
+  private rev: number;
+  private readonly home: Persistence;
   private tail: Promise<unknown> = Promise.resolve();
 
-  private constructor(file: string | null, data: AgoraData) {
-    this.file = file;
+  private constructor(home: Persistence, data: AgoraData, rev: number) {
+    this.home = home;
     this.data = data;
+    this.rev = rev;
   }
 
-  /** Loads the room from disk, or seeds it with `init` if the file is absent. */
+  /** Loads the room from its home, or seeds it with `init` if it is not there. */
   static async open(file: string | null, init: () => AgoraData): Promise<AgoraStore> {
-    if (file === null) return new AgoraStore(null, init());
-    try {
-      const raw = await readFile(file, 'utf8');
-      return new AgoraStore(file, hydrate(JSON.parse(raw) as AgoraData));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      const store = new AgoraStore(file, init());
-      await store.persist();
-      return store;
-    }
+    return AgoraStore.on(file === null ? new MemoryPersistence() : new FilePersistence(file), init);
   }
 
-  /** Reads live state. Callers must not mutate what they get back. */
+  /** Loads the room from any home — a file, memory, or somewhere shared. */
+  static async on(home: Persistence, init: () => AgoraData): Promise<AgoraStore> {
+    const stored = await home.load();
+    if (stored !== null) return new AgoraStore(home, hydrate(stored.data), stored.rev);
+    const seeded = init();
+    const written = await home.save(seeded, 0);
+    return new AgoraStore(home, seeded, written.rev);
+  }
+
+  /** Where this room is kept, in words, for a startup line or an error. */
+  get home_(): string {
+    return this.home.kind;
+  }
+
+  /**
+   * Reads live state. Callers must not mutate what they get back.
+   *
+   * In shared mode this is the room as of the last load or write by *this*
+   * process, so it can be a moment behind. Every mutation re-reads before it
+   * decides anything, which is where correctness actually lives.
+   */
   read<T>(fn: (data: AgoraData) => T): T {
     return fn(this.data);
+  }
+
+  /** Pulls in anything other instances have written. A no-op when authoritative. */
+  async refresh(): Promise<void> {
+    if (this.home.authoritative) return;
+    const stored = await this.home.load();
+    if (stored === null) return;
+    this.data = hydrate(stored.data);
+    this.rev = stored.rev;
   }
 
   /**
@@ -75,25 +109,31 @@ export class AgoraStore {
    */
   async mutate<T>(fn: (data: AgoraData) => T): Promise<T> {
     const run = this.tail.then(async () => {
-      const draft = structuredClone(this.data);
-      const result = fn(draft);
-      if (draft.room.events.length > MAX_EVENTS) {
-        draft.room.events = draft.room.events.slice(-MAX_EVENTS);
+      for (let attempt = 1; attempt <= MAX_CAS_ATTEMPTS; attempt += 1) {
+        // Shared homes have no single writer, so every attempt starts from
+        // whatever is actually stored rather than from what we remember.
+        if (!this.home.authoritative && attempt > 1) await this.refresh();
+
+        const draft = structuredClone(this.data);
+        const result = fn(draft);
+        if (draft.room.events.length > MAX_EVENTS) {
+          draft.room.events = draft.room.events.slice(-MAX_EVENTS);
+        }
+
+        const written = await this.home.save(draft, this.rev);
+        if (written.ok) {
+          this.data = draft;
+          this.rev = written.rev;
+          return result;
+        }
       }
-      this.data = draft;
-      await this.persist();
-      return result;
+      throw new Error(
+        `Could not write the room to ${this.home.kind}: something else kept writing first. ` +
+          'This is contention, not corruption — nothing was lost, and retrying is safe.'
+      );
     });
     // Keep the chain alive even when this mutation rejects.
     this.tail = run.catch(() => undefined);
     return run;
-  }
-
-  private async persist(): Promise<void> {
-    if (this.file === null) return;
-    await mkdir(dirname(this.file), { recursive: true });
-    const tmp = join(dirname(this.file), `.${randomBytes(6).toString('hex')}.tmp`);
-    await writeFile(tmp, `${JSON.stringify(this.data, null, 2)}\n`, 'utf8');
-    await rename(tmp, this.file);
   }
 }

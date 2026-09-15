@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { EventBus } from './events.ts';
 import { AgoraStore } from './store/store.ts';
+import { persistenceFromEnv } from './store/persistence.ts';
 import { RoomService } from './room/service.ts';
 import { createAgoraData, OWNER_ID, PLAN_TASK_ID } from './room/seed.ts';
 import { seedContracts } from './room/close.ts';
@@ -56,6 +57,10 @@ Options for "agent add":
 
 Environment:
   AGORA_DIR           Where the room is stored (default ./.agora)
+  KV_REST_API_URL, KV_REST_API_TOKEN
+                      Act on a deployed room instead of the local file. Vercel sets
+                      these when you add a KV store; copy them to run any command
+                      here against the deployment — "agora token supervisor" first.
   AGORA_BROKER_<X>_URL, _KEY, _AUTH, _HEADERS, _PRICES
                       Broker calls to provider <X> so its spend is metered exactly.
                       Only for agents on an API key — a subscription would bill twice.
@@ -64,10 +69,23 @@ Environment:
   AGORA_ALLOWED_HOSTS Comma-separated Host values to accept, enabling DNS rebinding protection.
 `;
 
+/**
+ * Opens the room this command should act on.
+ *
+ * Usually that is the file in `.agora`. But if the KV variables are set, the
+ * room is somewhere shared — a deployed one — and the CLI acts on that instead.
+ * That is how you mint the first dashboard token for a deployment, and how
+ * `agora ledger` or `agora why` work against production without an extra tool.
+ */
 async function openService(): Promise<RoomService> {
   const config = loadConfig();
-  const store = await AgoraStore.open(config.roomFile, () => {
-    throw new Error(`No room at ${config.roomFile}. Run "agora init" first.`);
+  const home = persistenceFromEnv(process.env, config.roomFile);
+  const store = await AgoraStore.on(home, () => {
+    throw new Error(
+      home.authoritative
+        ? `No room at ${config.roomFile}. Run "agora init" first.`
+        : `No room in ${home.kind} yet. Open the deployment once and it will create one.`
+    );
   });
   return new RoomService(store, new EventBus());
 }

@@ -369,6 +369,16 @@ for what you meant, rather than a codebase that was already right.
 in `test/room-grid.test.ts`. Breaking the collapse, handing a row out twice, dropping the carry-onto-
 every-row, or letting the gate land a half-swept lane each fails it.
 
+## Running it somewhere
+
+`agora serve` is the shape the design assumes: one process holding the room,
+next to the repositories the gate needs. [deploy-vercel.md](deploy-vercel.md)
+covers hosting the room on a serverless host instead — what changes (the room
+moves to Redis, MCP loses its sessions) and what cannot go there at all (the
+merge gate, which needs real git against real checkouts). The split is the
+honest one: the room is a coordination surface and belongs where everyone can
+reach it; the gate touches your repositories and belongs where they are.
+
 ## The bet, stated plainly
 
 That contract-level review catches most of what matters, and a human ruling on shape and
