@@ -12,14 +12,16 @@ export const AUTH_PAGE_PLAN: PlanProposal = {
       title: 'Auth page UI',
       description: 'The sign-in form and its states.',
       paths: ['src/auth/AuthPage.tsx'],
-      suggestedOwner: 'claude'
+      suggestedOwner: 'claude',
+      evidence: 'Signing in with a good password reaches the dashboard; a bad one shows the 401 text.'
     },
     {
       key: 'api',
       title: 'Auth API route',
       description: 'The endpoint the form posts to.',
       paths: ['src/auth/api.ts'],
-      suggestedOwner: 'cursor'
+      suggestedOwner: 'cursor',
+      evidence: 'POST /api/auth/login returns a token for a known user and 401 for a bad password.'
     }
   ],
   seams: [

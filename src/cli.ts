@@ -170,7 +170,7 @@ async function cmdStatus(): Promise<void> {
     const owner = task.owner ?? (task.suggestedOwner !== null ? `${task.suggestedOwner}?` : '—');
     console.log(
       `  ${task.id.padEnd(20)} ${task.status.padEnd(10)} ${owner.padEnd(12)} ` +
-        `${task.messagesUsed}/${task.messageBudget} msgs  ${task.paths.join(' ')}`
+        `${task.actionsUsed}/${task.actionBudget} msgs  ${task.paths.join(' ')}`
     );
   }
   if (attention.length > 0) {

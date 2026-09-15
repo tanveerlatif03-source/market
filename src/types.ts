@@ -92,6 +92,16 @@ export interface Decision {
   version: number;
 }
 
+/** The one check that asks whether the work was any good, rather than legal. */
+export interface Evidence {
+  /** Stated in the plan, before any code is written. */
+  statement: string;
+  produced: boolean;
+  /** How it was shown. Filled in when produced. */
+  note: string;
+  producedAt: string | null;
+}
+
 export type TaskStatus = 'draft' | 'open' | 'claimed' | 'submitted' | 'accepted' | 'blocked';
 
 export type SubmissionOutcome = 'complete' | 'blocked' | 'needs-review';
@@ -100,6 +110,11 @@ export interface SeamCheck {
   decisionId: string;
   satisfied: boolean;
   note: string;
+  /**
+   * The contract version this was signed against (Q14). A later bump makes the
+   * signature worthless, which is what takes the lane stale.
+   */
+  signedVersion: number;
 }
 
 export interface Submission {
@@ -126,9 +141,14 @@ export interface Task {
   paths: string[];
   /** Ids of the seam decisions this task must build toward. */
   seams: string[];
-  /** Agents don't get bored, so every task has a message budget. */
-  messageBudget: number;
-  messagesUsed: number;
+  /**
+   * What this lane said would prove it worked (Q18). Null when there is
+   * nothing to prove — a solo lane may still declare one.
+   */
+  evidence: Evidence | null;
+  /** Agents don't get bored, so every lane has an action budget (Q15). */
+  actionBudget: number;
+  actionsUsed: number;
   /** Set when the budget ran out and the task stopped to ask the human. */
   budgetHaltedAt: string | null;
   blockedReason: string | null;
@@ -190,7 +210,10 @@ export type RoomEventType =
   | 'claim.taken'
   | 'claim.released'
   | 'claim.collision'
-  | 'claim.swept';
+  | 'claim.swept'
+  | 'evidence.produced'
+  | 'seam.amended'
+  | 'plan.edited';
 
 export interface RoomEvent {
   seq: number;

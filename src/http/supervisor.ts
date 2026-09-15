@@ -55,6 +55,32 @@ export async function handleSupervisorRequest(
     return true;
   }
 
+  const seamMatch = /^\/api\/seams\/([^/]+)\/amend$/.exec(path);
+  if (seamMatch !== null) {
+    sendJson(res, 200, await service.amendSeam(decodeURIComponent(seamMatch[1] as string), {
+      body: requireString(body, 'body'),
+      note: optionalString(body, 'note')
+    }));
+    return true;
+  }
+
+  const editMatch = /^\/api\/tasks\/([^/]+)\/edit$/.exec(path);
+  if (editMatch !== null) {
+    const edits: Parameters<RoomService['editPlannedLane']>[1] = {};
+    const title = optionalString(body, 'title');
+    const description = optionalString(body, 'description');
+    const paths = optionalStringArray(body, 'paths');
+    const evidence = optionalString(body, 'evidence');
+    if (title !== undefined) edits.title = title;
+    if (description !== undefined) edits.description = description;
+    if (paths !== undefined) edits.paths = paths;
+    if (evidence !== undefined) edits.evidence = evidence;
+    if (typeof body.actionBudget === 'number') edits.actionBudget = body.actionBudget;
+    if ('suggestedOwner' in body) edits.suggestedOwner = optionalString(body, 'suggestedOwner') ?? null;
+    sendJson(res, 200, await service.editPlannedLane(decodeURIComponent(editMatch[1] as string), edits));
+    return true;
+  }
+
   if (path === '/api/decisions') {
     sendJson(res, 200, await service.recordDecision({
       title: requireString(body, 'title'),
@@ -110,9 +136,9 @@ export async function handleSupervisorRequest(
     } else if (action === 'reopen') {
       sendJson(res, 200, await service.reopenTask(taskId, body.keepOwner === true));
     } else if (action === 'budget') {
-      const budget = body.messageBudget;
+      const budget = body.actionBudget;
       if (typeof budget !== 'number') {
-        throw new AgoraError('INVALID', '"messageBudget" is required.', 'Pass a whole number.');
+        throw new AgoraError('INVALID', '"actionBudget" is required.', 'Pass a whole number.');
       }
       sendJson(res, 200, await service.setTaskBudget(taskId, budget));
     } else {

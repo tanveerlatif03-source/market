@@ -354,9 +354,9 @@ describe('messages and budgets', () => {
     assert.deepEqual(asked.delivered, ['human']);
     assert.ok(room.service.supervisorView().attention.some((item) => item.includes('asked you')));
 
-    const before = room.service.snapshot().tasks.find((task) => task.id === room.ui)?.messagesUsed;
+    const before = room.service.snapshot().tasks.find((task) => task.id === room.ui)?.actionsUsed;
     await room.service.postAsHuman({ taskId: room.ui, threadId: asked.threadId, body: 'Yes, remember it.' });
-    const after = room.service.snapshot().tasks.find((task) => task.id === room.ui)?.messagesUsed;
+    const after = room.service.snapshot().tasks.find((task) => task.id === room.ui)?.actionsUsed;
     assert.equal(before, after);
   });
 });

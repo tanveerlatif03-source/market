@@ -89,7 +89,15 @@ const planSchema = z.object({
         description: z.string().optional(),
         paths: z.array(z.string()).describe('The files this task owns. No two tasks may own the same file.'),
         suggestedOwner: z.string().optional().describe('Which agent should take this lane.'),
-        messageBudget: z.number().int().positive().optional()
+        actionBudget: z.number().int().positive().optional(),
+        evidence: z
+          .string()
+          .optional()
+          .describe(
+            'What would demonstrate this lane worked. Not "tests pass" — a real demonstration: ' +
+              'the flow completing under three minutes, the quote for a known cart matching a ' +
+              'known number. Nothing lands until it is produced.'
+          )
       })
     )
     .min(1),
@@ -289,6 +297,33 @@ export function createAgentMcpServer(service: RoomService, agentId: string): Age
     },
     async (args) =>
       guard(() => service.releaseFile(agentId, { paths: args.paths, statusNote: args.status_note }))
+  );
+
+  server.registerTool(
+    'show_evidence',
+    {
+      title: 'Show your work',
+      description:
+        'Record what demonstrates your lane actually worked — the thing it promised in the plan. ' +
+        'Nothing lands until this is here, so do it before you expect to merge.',
+      inputSchema: {
+        task_id: z.string(),
+        note: z
+          .string()
+          .min(1)
+          .describe('How it was shown. Point at the run, the recording, the number that matched.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.produceEvidence(agentId, {
+          taskId: args.task_id,
+          note: args.note,
+          statusNote: args.status_note
+        })
+      )
   );
 
   server.registerResource(

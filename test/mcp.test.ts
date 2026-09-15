@@ -115,7 +115,15 @@ describe('the MCP surface', () => {
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ['claim_file', 'claim_task', 'post_message', 'read_room', 'release_file', 'submit_work']
+      [
+        'claim_file',
+        'claim_task',
+        'post_message',
+        'read_room',
+        'release_file',
+        'show_evidence',
+        'submit_work'
+      ]
     );
     await client.close();
   });

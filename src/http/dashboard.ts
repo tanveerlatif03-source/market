@@ -566,11 +566,11 @@ select.btn { padding-right: 8px; }
         on: { click: function () { act(api("/api/tasks/" + encodeURIComponent(task.id) + "/accept", {})); } } }));
     }
     actions.push(h("button", { class: "btn", text: "Raise budget", on: { click: function () {
-      var next = prompt("New message budget for \\"" + task.id + "\\"", String(Math.max(task.messageBudget, task.messagesUsed) + 20));
+      var next = prompt("New message budget for \\"" + task.id + "\\"", String(Math.max(task.actionBudget, task.actionsUsed) + 20));
       if (next === null) return;
       var value = Number(next);
       if (!Number.isFinite(value)) { toast("That is not a number.", true); return; }
-      act(api("/api/tasks/" + encodeURIComponent(task.id) + "/budget", { messageBudget: value }));
+      act(api("/api/tasks/" + encodeURIComponent(task.id) + "/budget", { actionBudget: value }));
     } } }));
     actions.push(h("button", { class: "btn", text: "Reopen",
       on: { click: function () { act(api("/api/tasks/" + encodeURIComponent(task.id) + "/reopen", {})); } } }));
@@ -603,7 +603,7 @@ select.btn { padding-right: 8px; }
         task.seams.length
           ? h("span", { class: "chip chip--accent", text: plural(task.seams.length, "seam") })
           : null,
-        meter(task.messagesUsed, task.messageBudget, task.budgetHaltedAt),
+        meter(task.actionsUsed, task.actionBudget, task.budgetHaltedAt),
         task.budgetHaltedAt ? h("span", { class: "chip chip--bad", text: "stopped on budget" }) : null),
       task.blockedReason
         ? h("div", { class: "task__last task__last--bad" },

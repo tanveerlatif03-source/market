@@ -180,15 +180,23 @@ phase assumes the one before it works.
 
 ### Phase 1 — the spine
 
-- GitHub app: hold a branch, read permissions, gate the merge (Q1, Q16)
-- Claim, release, heartbeat, soft lapse, automatic transfer (Q2–Q5)
-- Plan: agent drafts, human edits in place, declares evidence (Q10, Q18)
-- Contracts: signed, versioned, checked at merge, staleness on bump (Q6, Q12, Q14)
-- Action budgets (Q15)
-- One repo, one room, two agents
+- [x] Per-file claims: claim, release, heartbeat, soft lapse, automatic transfer (Q2–Q5)
+- [x] The merge gate: reads the diff, compares it to what the agent declared (Q1)
+- [x] Plan: agent drafts, human edits in place, every lane declares evidence (Q10, Q18)
+- [x] Contracts: signed against a version, checked at merge, stale on bump (Q6, Q12, Q14)
+- [x] Lanes sharing a contract land as a set, or not at all (Q12)
+- [x] Action budgets (Q15)
+- [ ] GitHub App: installation, webhooks, mirrored permissions (Q1, Q16)
 
 **Passes when** two agents build one feature across a real contract, and the gate refuses a lane
-violation neither agent admitted to.
+violation neither agent admitted to. — **passing**, in `test/phase1.test.ts`, against real git.
+
+**What the open box means.** The gate is built and enforced against a real repository: it cuts
+lane branches, reads `git diff` for what actually changed, refuses on unclaimed or foreign files,
+stale or unsigned contracts and missing evidence, and merges a contract's lanes together or not at
+all. What is not built is the deployment shell — installing as a GitHub App, receiving webhooks,
+and reading org permissions from the GitHub API (Q16). That needs credentials and a public
+endpoint rather than more design, and the rules it would enforce are already written and tested.
 
 ### Phase 2 — survives being left alone
 

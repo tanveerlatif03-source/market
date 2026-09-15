@@ -68,7 +68,9 @@ export interface PlanProposalTask {
   description?: string;
   paths: string[];
   suggestedOwner?: string;
-  messageBudget?: number;
+  actionBudget?: number;
+  /** What would demonstrate this lane worked. Approved alongside the split. */
+  evidence?: string;
 }
 
 export interface PlanProposalSeam {
@@ -86,11 +88,14 @@ export interface PlanProposal {
   decisions?: { title: string; body: string }[];
 }
 
+export type UnsignedSeamCheck = Omit<SeamCheck, 'signedVersion'>;
+
 export interface SubmitWorkInput extends StatusInput {
   taskId: string;
   summary: string;
   filesChanged?: string[];
-  seamChecks?: SeamCheck[];
+  /** Agents do not supply the version — the room stamps whatever is current. */
+  seamChecks?: UnsignedSeamCheck[];
   outcome: SubmissionOutcome;
   plan?: PlanProposal;
 }
@@ -297,13 +302,13 @@ export class RoomService {
         );
       }
 
-      if (task.messagesUsed >= task.messageBudget) {
+      if (task.actionsUsed >= task.actionBudget) {
         this.haltOnBudget(room, task, emit);
         throw new AgoraError(
           'BUDGET_EXHAUSTED',
-          `"${task.id}" has used all ${task.messageBudget} of its messages.`,
+          `"${task.id}" has used all ${task.actionBudget} of its messages.`,
           'Stop and wait. The human has been asked to raise the budget or redirect the work.',
-          { messageBudget: task.messageBudget, messagesUsed: task.messagesUsed }
+          { actionBudget: task.actionBudget, actionsUsed: task.actionsUsed }
         );
       }
 
@@ -320,7 +325,7 @@ export class RoomService {
       };
       thread.messages.push(message);
       thread.updatedAt = at;
-      task.messagesUsed += 1;
+      task.actionsUsed += 1;
       task.updatedAt = at;
 
       const delivered = thread.participants.filter((participant) => participant !== agent.id);
@@ -333,7 +338,7 @@ export class RoomService {
         audience: delivered
       });
 
-      if (task.messagesUsed >= task.messageBudget) {
+      if (task.actionsUsed >= task.actionBudget) {
         this.haltOnBudget(room, task, emit);
       }
 
@@ -343,7 +348,7 @@ export class RoomService {
         taskId: task.id
       });
 
-      const remaining = task.messageBudget - task.messagesUsed;
+      const remaining = task.actionBudget - task.actionsUsed;
       return {
         threadId: thread.id,
         messageId: message.id,
@@ -405,7 +410,12 @@ export class RoomService {
         );
       }
 
-      const seamChecks = input.seamChecks ?? [];
+      const signed: SeamCheck[] = (input.seamChecks ?? []).map((check) => ({
+        ...check,
+        signedVersion:
+          room.decisions.find((decision) => decision.id === check.decisionId)?.version ?? 0
+      }));
+      const seamChecks = signed;
       for (const check of seamChecks) {
         if (!room.decisions.some((decision) => decision.id === check.decisionId)) {
           throw new AgoraError(
@@ -438,6 +448,8 @@ export class RoomService {
           );
         }
       }
+
+      this.spendAction(room, task, emit);
 
       const at = nowIso();
       const submission: Submission = {
@@ -581,8 +593,12 @@ export class RoomService {
         status: 'draft',
         paths: proposed.paths.map(normalizePath),
         seams: [],
-        messageBudget: proposed.messageBudget ?? room.defaultMessageBudget,
-        messagesUsed: 0,
+        evidence:
+          proposed.evidence === undefined || proposed.evidence.trim() === ''
+            ? null
+            : { statement: proposed.evidence.trim(), produced: false, note: '', producedAt: null },
+        actionBudget: proposed.actionBudget ?? room.defaultMessageBudget,
+        actionsUsed: 0,
         budgetHaltedAt: null,
         blockedReason: null,
         claimedAt: null,
@@ -816,6 +832,17 @@ export class RoomService {
           'Wait for the lead to propose a split.'
         );
       }
+      const naked = this.lanesWithoutEvidence(room);
+      if (naked.length > 0) {
+        throw new AgoraError(
+          'INVALID',
+          `These lanes promise nothing: ${naked.join(', ')}.`,
+          'Every lane states what would demonstrate it worked, before work starts. Add evidence ' +
+            'to each, or ask the lead to redraft.',
+          { lanes: naked }
+        );
+      }
+
       const at = nowIso();
       room.plan.status = 'approved';
       room.plan.decidedBy = HUMAN_ID;
@@ -1004,21 +1031,21 @@ export class RoomService {
   }
 
   /** Raise a task's message budget and let it start talking again. */
-  async setTaskBudget(taskId: string, messageBudget: number): Promise<Task> {
+  async setTaskBudget(taskId: string, actionBudget: number): Promise<Task> {
     return this.apply((data, emit) => {
       const task = this.taskOf(data.room, taskId);
-      if (!Number.isInteger(messageBudget) || messageBudget < 0) {
+      if (!Number.isInteger(actionBudget) || actionBudget < 0) {
         throw new AgoraError('INVALID', 'A message budget is a non-negative integer.', 'Pass a whole number.');
       }
-      task.messageBudget = messageBudget;
-      if (messageBudget > task.messagesUsed) task.budgetHaltedAt = null;
+      task.actionBudget = actionBudget;
+      if (actionBudget > task.actionsUsed) task.budgetHaltedAt = null;
       task.updatedAt = nowIso();
       emit({
         type: 'task.budget',
         actor: HUMAN_ID,
         taskId: task.id,
         threadId: null,
-        summary: `The human set the message budget for "${task.id}" to ${messageBudget}.`,
+        summary: `The human set the message budget for "${task.id}" to ${actionBudget}.`,
         audience: task.owner !== null ? [task.owner] : []
       });
       return task;
@@ -1077,7 +1104,7 @@ export class RoomService {
         threadId: thread.id,
         messageId: message.id,
         delivered,
-        budgetRemaining: task.messageBudget - task.messagesUsed,
+        budgetRemaining: task.actionBudget - task.actionsUsed,
         message: `Delivered to ${delivered.join(', ')}.`
       };
     });
@@ -1160,6 +1187,14 @@ export class RoomService {
           taskId: input.laneId
         });
         return { collision: { path: outcome.claim.path, heldBy: outcome.heldBy } };
+      }
+
+      // Taking new ground costs an action. Re-claiming a file you already hold
+      // is the heartbeat that keeps it — charging for that would punish exactly
+      // the behaviour the lock system depends on.
+      if (outcome.kind !== 'refreshed') {
+        const lane = room.tasks.find((candidate) => candidate.id === input.laneId);
+        if (lane !== undefined) this.spendAction(room, lane, emit);
       }
 
       // Claiming is touching: it is how an agent says it is still on a file.
@@ -1301,6 +1336,171 @@ export class RoomService {
     }
   }
 
+  /**
+   * Charges one action to a lane (Q15). Actions are the one thing countable
+   * with certainty, and they are what stops a runaway loop.
+   */
+  private spendAction(room: Room, task: Task, emit: EmitFn): void {
+    if (task.actionsUsed >= task.actionBudget) {
+      this.haltOnBudget(room, task, emit);
+      throw new AgoraError(
+        'BUDGET_EXHAUSTED',
+        `"${task.id}" has spent all ${task.actionBudget} of its actions.`,
+        'Stop and wait. The human has been asked to raise the budget or redirect the work.',
+        { actionBudget: task.actionBudget, actionsUsed: task.actionsUsed }
+      );
+    }
+    task.actionsUsed += 1;
+    task.updatedAt = nowIso();
+    if (task.actionsUsed >= task.actionBudget) this.haltOnBudget(room, task, emit);
+  }
+
+  // ------------------------------------------------- evidence and contracts
+
+  /** An agent showing its work (Q18). Nothing lands until this happens. */
+  async produceEvidence(
+    agentId: string,
+    input: { taskId: string; note: string; statusNote?: string }
+  ): Promise<{ task: Task; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+      const task = this.taskOf(room, input.taskId);
+
+      if (task.owner !== agentId) {
+        throw new AgoraError(
+          'NOT_OWNER',
+          `"${task.id}" is owned by ${task.owner ?? 'nobody'}.`,
+          'Only the lane that promised the evidence can show it.',
+          { owner: task.owner }
+        );
+      }
+      if (task.evidence === null) {
+        throw new AgoraError(
+          'INVALID',
+          `"${task.id}" never declared any evidence.`,
+          'Nothing to show. Ask the human to add it to the plan if this lane needs proving.'
+        );
+      }
+
+      const at = nowIso();
+      task.evidence = { ...task.evidence, produced: true, note: input.note, producedAt: at };
+      task.updatedAt = at;
+
+      emit({
+        type: 'evidence.produced',
+        actor: agentId,
+        taskId: task.id,
+        threadId: null,
+        summary: `${agent.displayName} showed "${task.id}" works: ${input.note}`,
+        audience: []
+      });
+      this.touchStatus(agent, emit, { note: input.statusNote, state: 'done', taskId: task.id });
+
+      return { task, message: `Recorded. "${task.id}" has shown its evidence.` };
+    });
+  }
+
+  /**
+   * Moving a contract (Q14). Every signature against the old version becomes
+   * worthless, so the lanes that signed it go stale — the gate stops them, and
+   * they are woken now rather than finding out at merge.
+   */
+  async amendSeam(
+    decisionId: string,
+    input: { body: string; note?: string }
+  ): Promise<{ decision: Decision; stale: string[] }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const decision = room.decisions.find((candidate) => candidate.id === decisionId);
+      if (decision === undefined) {
+        throw new AgoraError('NOT_FOUND', `No decision "${decisionId}".`, 'Use an id from read_room.');
+      }
+
+      const from = decision.version;
+      decision.version = from + 1;
+      decision.body = input.body;
+
+      // Whoever signed the old version has work that may no longer hold.
+      const stale: string[] = [];
+      const woken: string[] = [];
+      for (const task of room.tasks) {
+        if (!task.seams.includes(decisionId)) continue;
+        const signed = task.submissions
+          .at(-1)
+          ?.seamChecks.find((check) => check.decisionId === decisionId);
+        if (signed !== undefined && signed.signedVersion < decision.version) {
+          stale.push(task.id);
+          if (task.owner !== null) woken.push(task.owner);
+        }
+      }
+
+      emit({
+        type: 'seam.amended',
+        actor: HUMAN_ID,
+        taskId: null,
+        threadId: null,
+        summary:
+          `"${decision.title}" moved to v${decision.version}.` +
+          (stale.length > 0
+            ? ` ${stale.join(', ')} signed the old version and must confirm again.`
+            : ' Nothing had signed the old version.'),
+        audience: unique(woken)
+      });
+
+      return { decision, stale };
+    });
+  }
+
+  /** The human correcting a drafted plan before approving it (Q10). */
+  async editPlannedLane(
+    taskId: string,
+    edits: { title?: string; description?: string; paths?: string[]; evidence?: string | null; actionBudget?: number; suggestedOwner?: string | null }
+  ): Promise<Task> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const task = this.taskOf(room, taskId);
+      if (task.status !== 'draft') {
+        throw new AgoraError(
+          'INVALID',
+          `"${task.id}" is ${task.status}, not a draft.`,
+          'A plan can only be edited before it is approved. Amend the contract instead.'
+        );
+      }
+      if (edits.title !== undefined) task.title = edits.title;
+      if (edits.description !== undefined) task.description = edits.description;
+      if (edits.paths !== undefined) task.paths = edits.paths.map(normalizePath);
+      if (edits.actionBudget !== undefined) task.actionBudget = edits.actionBudget;
+      if (edits.suggestedOwner !== undefined) task.suggestedOwner = edits.suggestedOwner;
+      if (edits.evidence !== undefined) {
+        task.evidence =
+          edits.evidence === null || edits.evidence.trim() === ''
+            ? null
+            : { statement: edits.evidence.trim(), produced: false, note: '', producedAt: null };
+      }
+      task.updatedAt = nowIso();
+
+      emit({
+        type: 'plan.edited',
+        actor: HUMAN_ID,
+        taskId: task.id,
+        threadId: null,
+        summary: `The human edited "${task.id}" before approving the plan.`,
+        audience: []
+      });
+      return task;
+    });
+  }
+
+  /** Refuses to approve a split where a lane promises nothing (Q18). */
+  private lanesWithoutEvidence(room: Room): string[] {
+    return room.tasks
+      .filter((task) => task.status === 'draft' && task.evidence === null)
+      .map((task) => task.id);
+  }
+
   // ------------------------------------------------------------- internals
 
   private async apply<T>(fn: (data: AgoraData, emit: EmitFn) => T): Promise<T> {
@@ -1401,7 +1601,7 @@ export class RoomService {
       actor: task.owner ?? HUMAN_ID,
       taskId: task.id,
       threadId: null,
-      summary: `"${task.id}" spent its ${task.messageBudget}-message budget and stopped to ask the human.`,
+      summary: `"${task.id}" spent its ${task.actionBudget}-message budget and stopped to ask the human.`,
       audience: unique([HUMAN_ID, ...(task.owner !== null ? [task.owner] : [])])
     });
   }

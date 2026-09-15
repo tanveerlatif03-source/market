@@ -128,7 +128,7 @@ function buildGuidance(room: Room, agent: Agent, owned: Task[], claimable: Task[
         `Task "${task.id}" spent its message budget and stopped. The human has been asked; wait.`
       );
     } else if (task.status === 'claimed') {
-      const remaining = task.messageBudget - task.messagesUsed;
+      const remaining = task.actionBudget - task.actionsUsed;
       guidance.push(
         `You own "${task.id}". Work only inside ${task.paths.join(', ') || 'no declared paths'} ` +
           `and finish with submit_work. ${remaining} message(s) left on this task.`
