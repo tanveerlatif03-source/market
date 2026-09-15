@@ -26,6 +26,7 @@ function planTask(at: string): Task {
     status: 'open',
     paths: [],
     seams: [],
+    laneOwner: null,
     evidence: null,
     actionBudget: PLAN_MESSAGE_BUDGET,
     actionsUsed: 0,
@@ -61,6 +62,10 @@ export function createRoom(options: { name: string; goal: string }): Room {
     decisions: [],
     tasks: [planTask(at)],
     claims: [],
+    humans: [],
+    attention: [],
+    probes: {},
+    dissents: [],
     threads: [],
     events: [
       {

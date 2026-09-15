@@ -25,6 +25,7 @@ function instructionsFor(roomName: string, goal: string): string {
     '- The seam — exactly where two pieces touch, what each side provides and expects — is agreed before work starts and stored as a room decision. Build toward it.',
     '- Every message attaches to a task and spends that task\'s message budget. When the budget runs out the task stops and the human is asked.',
     '- Claim every file with claim_file before you write to it, and release it when you are done. Re-claiming a file you hold is how you say you are still on it; holding one you have finished with only blocks someone else.',
+    '- If you think a ruling is wrong, use dissent — comply and object at the same time. It stops nothing and costs nothing.',
     '- Send only the ask and the answer. Your reasoning and live status go to the human through status_note on any tool call, never to another agent.',
     '- Threads are visible to their participants and to the human. Decisions are visible to everyone, including agents that join later.',
     '',
@@ -324,6 +325,51 @@ export function createAgentMcpServer(service: RoomService, agentId: string): Age
           statusNote: args.status_note
         })
       )
+  );
+
+  server.registerTool(
+    'dissent',
+    {
+      title: 'Object, on the record',
+      description:
+        'Register that you think a ruling is wrong, while still complying with it. This does not ' +
+        'refuse anything and does not stop your work — it puts your objection in front of the ' +
+        'humans so a bad call gets caught before its cost lands. Cheap on purpose.',
+      inputSchema: {
+        about: z.string().min(1).describe('The ruling you are objecting to, as you understood it.'),
+        because: z.string().min(1).describe('Why you think it is wrong. Concretely.'),
+        lane: z.string().optional(),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.recordDissent(agentId, {
+          about: args.about,
+          because: args.because,
+          laneId: args.lane
+        })
+      )
+  );
+
+  server.registerTool(
+    'report_missing',
+    {
+      title: 'Say what you are missing',
+      description:
+        'Answer the question Agora asks when a lane has been rewriting the same file without ' +
+        'showing anything. Name the one thing you are missing. Saying you are stuck costs you ' +
+        'nothing and is always cheaper than another rewrite.',
+      inputSchema: {
+        lane: z.string(),
+        missing: z.string().min(1).describe('The one thing standing between you and the evidence.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() => service.answerProbe(agentId, { laneId: args.lane, missing: args.missing }))
   );
 
   server.registerResource(

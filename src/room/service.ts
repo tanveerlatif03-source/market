@@ -13,7 +13,13 @@ import type { Claim, ClaimHolderActivity, ClaimState } from './claims.ts';
 import { DEFAULT_MESSAGE_BUDGET, HUMAN_ID, PLAN_TASK_ID } from './seed.ts';
 import { agentRoomView, supervisorRoomView } from './views.ts';
 import type { AgentRoomView, SupervisorRoomView } from './views.ts';
+import { OPENS_TO_ROOM_AFTER_MS, canAnswer, queueFor } from './attention.ts';
+import type { AttentionItem, AttentionQueue } from './attention.ts';
+import { assessStuck, detectSpin } from './spin.ts';
+import type { StuckVerdict } from './spin.ts';
 import type {
+  Dissent,
+  Human,
   Agent,
   AgentScope,
   AgentStatus,
@@ -468,6 +474,18 @@ export class RoomService {
       if (input.outcome === 'blocked') {
         task.status = 'blocked';
         task.blockedReason = input.summary;
+        this.raise(room, emit, {
+          kind: 'blocked',
+          laneId: task.id,
+          title: `"${task.id}" stopped itself`,
+          detail: input.summary,
+          needsMergeRights: false,
+          options: [
+            { id: 'answer', label: 'Answer it', effect: 'You supply what it is waiting on and it resumes.' },
+            { id: 'reassign', label: 'Give it to someone else', effect: 'Another agent picks the lane up.' },
+            { id: 'drop', label: 'Drop the lane', effect: 'The work is abandoned and the files released.' }
+          ]
+        });
       } else {
         task.status = 'submitted';
         task.blockedReason = null;
@@ -593,6 +611,7 @@ export class RoomService {
         status: 'draft',
         paths: proposed.paths.map(normalizePath),
         seams: [],
+        laneOwner: null,
         evidence:
           proposed.evidence === undefined || proposed.evidence.trim() === ''
             ? null
@@ -1181,6 +1200,20 @@ export class RoomService {
             'right now. The split put two agents in the same code.',
           audience: unique([HUMAN_ID, outcome.heldBy])
         });
+        this.raise(room, emit, {
+          kind: 'collision',
+          laneId: input.laneId,
+          title: `Two agents need ${outcome.claim.path}`,
+          detail:
+            `${agent.displayName} and ${outcome.heldBy} both need "${outcome.claim.path}" right now. ` +
+            'That is a planning problem: the split put two agents in the same code.',
+          needsMergeRights: true,
+          options: [
+            { id: 'wait', label: `Let ${outcome.heldBy} finish`, effect: `${agent.displayName} works elsewhere until it is released.` },
+            { id: 'hand-over', label: `Give it to ${agent.displayName}`, effect: `${outcome.heldBy} loses the file and is told why.` },
+            { id: 'resplit', label: 'Redraw the split', effect: 'The lead redrafts so the two lanes stop overlapping.' }
+          ]
+        });
         this.touchStatus(agent, emit, {
           note: input.statusNote,
           state: 'blocked',
@@ -1229,6 +1262,29 @@ export class RoomService {
         state: 'working',
         taskId: input.laneId
       });
+
+      // Cheap enough to check on every touch, which is the point (Q20).
+      const spinning = detectSpin({
+        laneId: input.laneId,
+        claims: room.claims,
+        evidenceProducedAt:
+          room.tasks.find((t) => t.id === input.laneId)?.evidence?.producedAt ?? null
+      });
+      if (spinning !== null) {
+        const probes = room.probes[input.laneId] ?? [];
+        const verdict = assessStuck(spinning, probes);
+        if (verdict.kind === 'ask') {
+          room.probes[input.laneId] = [...probes, { askedAt: nowIso(), missing: null, answeredAt: null }];
+          emit({
+            type: 'spin.detected',
+            actor: agentId,
+            taskId: input.laneId,
+            threadId: null,
+            summary: spinning.fact,
+            audience: [agentId]
+          });
+        }
+      }
 
       const holding = room.claims.filter((claim) => claim.holder === agentId).length;
       const message =
@@ -1501,6 +1557,282 @@ export class RoomService {
       .map((task) => task.id);
   }
 
+  // ----------------------------------------------------- people and attention
+
+  /** Adds a person to the room. Merge rights mirror the repository (Q16). */
+  async addHuman(input: { id: string; displayName: string; canMerge: boolean }): Promise<Human> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      if (room.humans.some((human) => human.id === input.id)) {
+        throw new AgoraError('INVALID', `${input.id} is already in this room.`, 'Pick another id.');
+      }
+      const human: Human = {
+        id: input.id,
+        displayName: input.displayName,
+        canMerge: input.canMerge,
+        joinedAt: nowIso(),
+        lastSeenAt: null
+      };
+      room.humans.push(human);
+      emit({
+        type: 'human.joined',
+        actor: input.id,
+        taskId: null,
+        threadId: null,
+        summary: `${input.displayName} joined${input.canMerge ? ' and can merge' : ''}.`,
+        audience: []
+      });
+      return human;
+    });
+  }
+
+  /** Names the person who answers for a lane first (Q8). */
+  async assignLaneOwner(taskId: string, humanId: string | null): Promise<Task> {
+    return this.apply((data, emit) => {
+      const task = this.taskOf(data.room, taskId);
+      if (humanId !== null && !data.room.humans.some((human) => human.id === humanId)) {
+        throw new AgoraError('NOT_FOUND', `No one called ${humanId} is in this room.`, 'Add them first.');
+      }
+      task.laneOwner = humanId;
+      task.updatedAt = nowIso();
+      emit({
+        type: 'attention.opened',
+        actor: HUMAN_ID,
+        taskId: task.id,
+        threadId: null,
+        summary:
+          humanId === null
+            ? `"${task.id}" has no named person; its questions go straight to the room.`
+            : `${humanId} answers for "${task.id}" first.`,
+        audience: humanId === null ? [] : [humanId]
+      });
+      return task;
+    });
+  }
+
+  /** What is waiting on this person, and what has opened up to everyone (Q8). */
+  attentionFor(humanId: string): AttentionQueue {
+    return this.store.read((data) => {
+      const human = data.room.humans.find((candidate) => candidate.id === humanId);
+      return queueFor(
+        data.room.attention,
+        { id: humanId, canMerge: human?.canMerge ?? false },
+        Date.now()
+      );
+    });
+  }
+
+  /** Answering from the notification, which is the only way the timer is ever beaten (Q11). */
+  async answerAttention(
+    humanId: string,
+    input: { itemId: string; optionId: string; note?: string }
+  ): Promise<{ item: AttentionItem; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const human = room.humans.find((candidate) => candidate.id === humanId);
+      if (human === undefined) {
+        throw new AgoraError('UNAUTHORIZED', `${humanId} is not in this room.`, 'Ask to be added.');
+      }
+      const item = room.attention.find((candidate) => candidate.id === input.itemId);
+      if (item === undefined) {
+        throw new AgoraError('NOT_FOUND', `No open question "${input.itemId}".`, 'It may already be settled.');
+      }
+
+      const verdict = canAnswer(item, human, Date.now());
+      if (!verdict.allowed) {
+        throw new AgoraError('UNAUTHORIZED', verdict.why, 'Someone else has this one.');
+      }
+      const option = item.options.find((candidate) => candidate.id === input.optionId);
+      if (option === undefined) {
+        throw new AgoraError(
+          'INVALID',
+          `"${input.optionId}" is not one of the answers.`,
+          `Choose one of: ${item.options.map((o) => o.id).join(', ')}.`
+        );
+      }
+
+      item.resolvedAt = nowIso();
+      item.resolvedBy = humanId;
+      item.resolution = input.note ? `${option.label} — ${input.note}` : option.label;
+      human.lastSeenAt = item.resolvedAt;
+
+      emit({
+        type: 'attention.answered',
+        actor: humanId,
+        taskId: item.laneId,
+        threadId: null,
+        summary: `${human.displayName} settled "${item.title}": ${item.resolution}`,
+        audience: []
+      });
+
+      return { item, message: `Settled. ${option.effect}` };
+    });
+  }
+
+  /** Complying and objecting at once (Q22). Cheap on purpose. */
+  async recordDissent(
+    agentId: string,
+    input: { about: string; because: string; laneId?: string }
+  ): Promise<Dissent> {
+    return this.apply((data, emit) => {
+      const agent = this.agentOf(data, agentId);
+      const dissent: Dissent = {
+        id: shortId('dis'),
+        by: agentId,
+        about: input.about,
+        because: input.because,
+        laneId: input.laneId ?? null,
+        at: nowIso()
+      };
+      data.room.dissents.push(dissent);
+      emit({
+        type: 'dissent.recorded',
+        actor: agentId,
+        taskId: dissent.laneId,
+        threadId: null,
+        summary: `${agent.displayName} complied but objects: ${input.because}`,
+        audience: [HUMAN_ID]
+      });
+      return dissent;
+    });
+  }
+
+  /**
+   * Looks for a lane going in circles, and acts on what it finds (Q20). Cheap
+   * enough to run on every submission or claim.
+   */
+  async checkForSpin(laneId: string): Promise<StuckVerdict | null> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const task = room.tasks.find((candidate) => candidate.id === laneId);
+      if (task === undefined || task.owner === null) return null;
+
+      const signal = detectSpin({
+        laneId,
+        claims: room.claims,
+        evidenceProducedAt: task.evidence?.producedAt ?? null
+      });
+      if (signal === null) return null;
+
+      const probes = room.probes[laneId] ?? [];
+      const verdict = assessStuck(signal, probes);
+
+      if (verdict.kind === 'ask') {
+        room.probes[laneId] = [...probes, { askedAt: nowIso(), missing: null, answeredAt: null }];
+        emit({
+          type: 'spin.detected',
+          actor: task.owner,
+          taskId: laneId,
+          threadId: null,
+          summary: signal.fact,
+          audience: [task.owner]
+        });
+      } else if (verdict.kind === 'stuck') {
+        this.raise(room, emit, {
+          kind: 'stuck',
+          laneId,
+          title: `"${laneId}" is not moving`,
+          detail:
+            `${signal.fact} Asked twice what was missing; both times: ${verdict.missing}.`,
+          needsMergeRights: false,
+          options: [
+            { id: 'redirect', label: 'Redirect it', effect: 'You tell the lane what to do instead.' },
+            { id: 'unblock', label: 'Answer what is missing', effect: `You supply: ${verdict.missing}.` },
+            { id: 'reassign', label: 'Give the lane to someone else', effect: 'The work moves to another agent.' },
+            { id: 'stop', label: 'Stop the lane', effect: 'It is dropped and its files are released.' }
+          ]
+        });
+        emit({
+          type: 'spin.stuck',
+          actor: task.owner,
+          taskId: laneId,
+          threadId: null,
+          summary: `"${laneId}" is stuck on ${verdict.missing}.`,
+          audience: [HUMAN_ID, task.owner]
+        });
+      }
+      return verdict;
+    });
+  }
+
+  /** The agent naming what it is missing, which is how the loop closes. */
+  async answerProbe(
+    agentId: string,
+    input: { laneId: string; missing: string }
+  ): Promise<{ message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      const probes = room.probes[input.laneId] ?? [];
+      const open = probes.at(-1);
+      if (open === undefined || open.missing !== null) {
+        throw new AgoraError(
+          'INVALID',
+          'Nothing was asked of this lane.',
+          'You can always raise it yourself with post_message.'
+        );
+      }
+      open.missing = input.missing;
+      open.answeredAt = nowIso();
+      emit({
+        type: 'agent.status',
+        actor: agentId,
+        taskId: input.laneId,
+        threadId: null,
+        summary: `${agent.displayName} is missing: ${input.missing}`,
+        audience: [HUMAN_ID]
+      });
+      return { message: 'Noted. Saying so was cheaper than another rewrite.' };
+    });
+  }
+
+  /** Puts something in front of a person, named if the lane has an owner (Q8). */
+  private raise(
+    room: Room,
+    emit: EmitFn,
+    input: {
+      kind: AttentionItem['kind'];
+      laneId: string | null;
+      title: string;
+      detail: string;
+      options: AttentionItem['options'];
+      needsMergeRights: boolean;
+    }
+  ): AttentionItem {
+    const at = nowIso();
+    const lane = input.laneId === null ? undefined : room.tasks.find((t) => t.id === input.laneId);
+    const assignedTo = lane?.laneOwner ?? null;
+    const item: AttentionItem = {
+      id: shortId('att'),
+      kind: input.kind,
+      laneId: input.laneId,
+      title: input.title,
+      detail: input.detail,
+      options: input.options,
+      assignedTo,
+      openedAt: at,
+      opensToRoomAt:
+        assignedTo === null ? null : new Date(Date.parse(at) + OPENS_TO_ROOM_AFTER_MS).toISOString(),
+      needsMergeRights: input.needsMergeRights,
+      resolvedAt: null,
+      resolvedBy: null,
+      resolution: null
+    };
+    room.attention.push(item);
+    emit({
+      type: 'attention.raised',
+      actor: HUMAN_ID,
+      taskId: input.laneId,
+      threadId: null,
+      summary:
+        assignedTo === null
+          ? `The room is asked: ${input.title}`
+          : `${assignedTo} is asked: ${input.title} (opens to the room in 15 minutes)`,
+      audience: assignedTo === null ? [] : [assignedTo]
+    });
+    return item;
+  }
+
   // ------------------------------------------------------------- internals
 
   private async apply<T>(fn: (data: AgoraData, emit: EmitFn) => T): Promise<T> {
@@ -1596,6 +1928,18 @@ export class RoomService {
   private haltOnBudget(room: Room, task: Task, emit: EmitFn): void {
     if (task.budgetHaltedAt !== null) return;
     task.budgetHaltedAt = nowIso();
+    this.raise(room, emit, {
+      kind: 'budget',
+      laneId: task.id,
+      title: `"${task.id}" has spent its budget`,
+      detail: `${task.actionsUsed} of ${task.actionBudget} actions used. The lane has stopped.`,
+      needsMergeRights: true,
+      options: [
+        { id: 'raise', label: 'Give it more', effect: 'The lane resumes with a larger budget.' },
+        { id: 'redirect', label: 'Redirect it', effect: 'You tell the lane what to do with what is left.' },
+        { id: 'stop', label: 'Leave it stopped', effect: 'The lane stays halted and its files are released.' }
+      ]
+    });
     emit({
       type: 'budget.exhausted',
       actor: task.owner ?? HUMAN_ID,

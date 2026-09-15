@@ -37,6 +37,8 @@ export interface Claim {
   claimedAt: string;
   /** Last time the holder claimed this exact file. Claiming is touching (Q2). */
   touchedAt: string;
+  /** How many times it has been claimed. Rewrites, counted (Q20). */
+  touches: number;
 }
 
 export type ClaimOutcome =
@@ -110,7 +112,8 @@ export function requestClaim(request: ClaimRequest): ClaimOutcome {
         holder: request.agentId,
         laneId: request.laneId,
         claimedAt: at,
-        touchedAt: at
+        touchedAt: at,
+        touches: 1
       }
     };
   }
@@ -120,7 +123,7 @@ export function requestClaim(request: ClaimRequest): ClaimOutcome {
     return {
       kind: 'refreshed',
       previousHolder: null,
-      claim: { ...existing, laneId: request.laneId, touchedAt: at }
+      claim: { ...existing, laneId: request.laneId, touchedAt: at, touches: existing.touches + 1 }
     };
   }
 
@@ -138,7 +141,8 @@ export function requestClaim(request: ClaimRequest): ClaimOutcome {
         holder: request.agentId,
         laneId: request.laneId,
         claimedAt: at,
-        touchedAt: at
+        touchedAt: at,
+        touches: 1
       }
     };
   }

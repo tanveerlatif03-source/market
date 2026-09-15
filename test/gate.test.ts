@@ -7,7 +7,7 @@ import type { Claim } from '../src/room/claims.ts';
 const AT = '2026-09-15T12:00:00.000Z';
 
 function claim(path: string, holder: string): Claim {
-  return { path, holder, laneId: 'wizard', claimedAt: AT, touchedAt: AT };
+  return { path, holder, laneId: 'wizard', claimedAt: AT, touchedAt: AT, touches: 1 };
 }
 
 function seam(overrides: Partial<SeamState> = {}): SeamState {

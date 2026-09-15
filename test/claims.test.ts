@@ -21,6 +21,7 @@ function claim(overrides: Partial<Claim> = {}): Claim {
     laneId: 'wizard',
     claimedAt: iso(0),
     touchedAt: iso(0),
+    touches: 1,
     ...overrides
   };
 }

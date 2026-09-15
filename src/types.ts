@@ -1,6 +1,10 @@
 import type { Claim } from './room/claims.ts';
+import type { AttentionItem } from './room/attention.ts';
+import type { StuckProbe } from './room/spin.ts';
 
 export type { Claim, ClaimState, ClaimHolderActivity } from './room/claims.ts';
+export type { AttentionItem, AttentionKind, AttentionOption, AttentionQueue } from './room/attention.ts';
+export type { SpinSignal, StuckProbe, StuckVerdict } from './room/spin.ts';
 
 /**
  * Agora domain types.
@@ -46,6 +50,23 @@ export interface Agent {
   lastSeenAt: string | null;
   /** Last time this agent claimed any file. Distinguishes "moved on" from "thinking". */
   latestTouchAt: string | null;
+}
+
+/**
+ * A person in the room (Q7). Several, not one — work that runs for days pulls
+ * in many people, and a single-supervisor cockpit is only half the thing.
+ */
+export interface Human {
+  id: string;
+  displayName: string;
+  /**
+   * Mirrors the repository (Q16). Whoever can merge to main can approve a plan,
+   * settle a contract or raise a cap. Everyone else can still pause, redirect
+   * and answer — anything reversible.
+   */
+  canMerge: boolean;
+  joinedAt: string;
+  lastSeenAt: string | null;
 }
 
 export type PlanStatus = 'none' | 'proposed' | 'approved' | 'rejected';
@@ -141,6 +162,8 @@ export interface Task {
   paths: string[];
   /** Ids of the seam decisions this task must build toward. */
   seams: string[];
+  /** The named human answering for this lane (Q8). */
+  laneOwner: string | null;
   /**
    * What this lane said would prove it worked (Q18). Null when there is
    * nothing to prove — a solo lane may still declare one.
@@ -185,6 +208,18 @@ export interface Thread {
   messages: Message[];
 }
 
+/** Complying and objecting at the same time (Q22). */
+export interface Dissent {
+  id: string;
+  by: string;
+  /** What was ruled, as the agent understood it. */
+  about: string;
+  /** Why the agent thinks it is wrong. */
+  because: string;
+  laneId: string | null;
+  at: string;
+}
+
 export type RoomEventType =
   | 'room.created'
   | 'agent.joined'
@@ -213,7 +248,14 @@ export type RoomEventType =
   | 'claim.swept'
   | 'evidence.produced'
   | 'seam.amended'
-  | 'plan.edited';
+  | 'plan.edited'
+  | 'human.joined'
+  | 'attention.raised'
+  | 'attention.answered'
+  | 'attention.opened'
+  | 'dissent.recorded'
+  | 'spin.detected'
+  | 'spin.stuck';
 
 export interface RoomEvent {
   seq: number;
@@ -243,6 +285,14 @@ export interface Room {
   tasks: Task[];
   /** Per-file claims (Q2-Q5). One claim per path, room-wide. */
   claims: Claim[];
+  /** The people in the room (Q7). */
+  humans: Human[];
+  /** Everything waiting on a person (Q8, Q11). */
+  attention: AttentionItem[];
+  /** Rounds of the "what is missing" question, per lane (Q20). */
+  probes: Record<string, StuckProbe[]>;
+  /** Objections agents registered while complying (Q22). */
+  dissents: Dissent[];
   threads: Thread[];
   events: RoomEvent[];
   eventSeq: number;

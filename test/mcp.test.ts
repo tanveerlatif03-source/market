@@ -118,9 +118,11 @@ describe('the MCP surface', () => {
       [
         'claim_file',
         'claim_task',
+        'dissent',
         'post_message',
         'read_room',
         'release_file',
+        'report_missing',
         'show_evidence',
         'submit_work'
       ]
