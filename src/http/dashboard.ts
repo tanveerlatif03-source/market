@@ -188,6 +188,25 @@ select.btn { padding-right: 8px; }
 .rows > * + * { border-top: 1px solid var(--hairline); }
 .row { padding: 14px 0; }
 
+/* ----------------------------------------------------------------- ledger */
+.ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ledger th, .ledger td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.ledger th { font-weight: 600; color: var(--ink-3); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; cursor: pointer; user-select: none; white-space: nowrap; }
+.ledger th:hover { color: var(--ink-1); }
+.ledger th[aria-sort]::after { content: "\\2191"; margin-left: 4px; opacity: .7; }
+.ledger th[aria-sort="descending"]::after { content: "\\2193"; }
+.ledger tbody tr:last-child td { border-bottom: 0; }
+.ledger__why { color: var(--ink-3); font-size: 12px; padding-top: 2px; }
+.ledger__scroll { overflow-x: auto; }
+.ledger__cost { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.health { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.health--needs-a-person { background: color-mix(in oklab, var(--bad) 16%, transparent); color: var(--bad); }
+.health--idle { background: var(--surface-2); color: var(--ink-3); }
+.health--working { background: color-mix(in oklab, var(--accent) 16%, transparent); color: var(--accent); }
+.health--waiting { background: color-mix(in oklab, var(--warn) 18%, transparent); color: var(--warn); }
+.health--ready { background: color-mix(in oklab, var(--good) 16%, transparent); color: var(--good); }
+.health--done { background: var(--surface-2); color: var(--ink-3); }
+
 /* -------------------------------------------------------------- attention */
 .attention {
   border-color: color-mix(in srgb, var(--warn) 34%, transparent);
@@ -321,6 +340,21 @@ select.btn { padding-right: 8px; }
 .reply input::placeholder { color: var(--ink-3); }
 .reply input:focus { border-color: var(--accent); outline: none; }
 
+/* ------------------------------------------------------------------ risks */
+.risk { display: flex; align-items: baseline; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.risk:last-of-type { border-bottom: 0; }
+.risk__label { font-weight: 600; font-size: 13px; }
+.risk__paths { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); overflow-wrap: anywhere; }
+.risk__grow { flex: 1; min-width: 0; }
+.risk__add { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.risk__add input {
+  padding: 8px 12px; border-radius: 10px; min-width: 0; flex: 1;
+  background: var(--surface); border: 1px solid var(--line); color: var(--ink); font-size: 13px;
+}
+.risk__add input::placeholder { color: var(--ink-3); }
+.risk__add input:focus { border-color: var(--accent); outline: none; }
+.risk__note { color: var(--ink-3); font-size: 12px; margin-top: 10px; }
+
 /* ------------------------------------------------------------------- gate */
 .gate { min-height: 78vh; display: grid; place-items: center; padding: 24px; }
 .gate__card {
@@ -393,6 +427,20 @@ select.btn { padding-right: 8px; }
       </div>
     </section>
 
+    <section class="card">
+      <div class="card__head">
+        <h2 class="card__title">Ledger</h2>
+        <span id="ledger-count" class="chip card__count"></span>
+      </div>
+      <div class="card__body">
+        <div class="ledger__scroll"><table class="ledger">
+          <thead><tr id="ledger-head"></tr></thead>
+          <tbody id="ledger-body"></tbody>
+        </table></div>
+        <div id="ledger-cost" class="ledger__why" style="margin-top:12px"></div>
+      </div>
+    </section>
+
     <div class="columns">
       <div>
         <section class="card">
@@ -411,6 +459,25 @@ select.btn { padding-right: 8px; }
             <span id="agent-count" class="chip card__count"></span>
           </div>
           <div class="card__body"><div id="agents" class="rows"></div></div>
+        </section>
+
+        <section class="card">
+          <div class="card__head">
+            <h2 class="card__title">Risk list</h2>
+            <span id="risk-count" class="chip card__count"></span>
+          </div>
+          <div class="card__body">
+            <div id="risks"></div>
+            <div class="risk__add">
+              <input id="risk-label" placeholder="Surface, e.g. Payments" aria-label="What this surface is" />
+              <input id="risk-paths" placeholder="**/billing/**, **/*.sql" aria-label="Paths, comma separated" />
+              <button id="risk-add" class="btn">Add</button>
+            </div>
+            <div class="risk__note">
+              Cross-review is a bet that the agent across a contract catches what matters.
+              This is where you decline to take it. Everything here waits for a person.
+            </div>
+          </div>
         </section>
 
         <section class="card">
@@ -537,6 +604,132 @@ select.btn { padding-right: 8px; }
   }
   function act(promise) {
     return promise.then(refresh).catch(function (error) { toast(error.message, true); });
+  }
+
+  // ------------------------------------------------------------------ risks
+  // Q13: default light. A team that will not take the bet sets a rule to "**".
+  function riskRow(rule, rules) {
+    return h("div", { class: "risk" },
+      h("div", { class: "risk__grow" },
+        h("div", { class: "risk__label", text: rule.label }),
+        h("div", { class: "risk__paths", text: rule.paths.join("  ") }),
+        rule.why ? h("div", { class: "risk__note", text: rule.why }) : null),
+      h("button", {
+        class: "btn btn--quiet", text: "Remove",
+        title: "Stop pulling a person onto " + rule.label,
+        on: { click: function () {
+          act(api("/api/risks", { rules: rules.filter(function (other) { return other.id !== rule.id; }) }));
+        } }
+      })
+    );
+  }
+
+  function renderRisks(rules) {
+    $("risk-count").textContent = rules.length === 0
+      ? "nothing flagged"
+      : plural(rules.length, "surface");
+    fill("risks", rules.map(function (rule) { return riskRow(rule, rules); }),
+      "Nothing pulls a person in automatically. Every lane rests on cross-review alone.");
+    $("risk-add").onclick = function () {
+      var label = $("risk-label").value.trim();
+      var paths = $("risk-paths").value.split(",").map(function (entry) { return entry.trim(); })
+        .filter(function (entry) { return entry !== ""; });
+      if (!label || paths.length === 0) {
+        toast("A surface needs a name and at least one path.", true);
+        return;
+      }
+      var id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      act(api("/api/risks", { rules: rules.concat([{
+        id: id, label: label, paths: paths,
+        why: "Added here, so a person looks before anything on this surface lands."
+      }]) })).then(function () {
+        $("risk-label").value = "";
+        $("risk-paths").value = "";
+      });
+    };
+  }
+
+  // ----------------------------------------------------------------- ledger
+  // Q19: a table, not a formula language. Worst first, because the first thing
+  // a person walking in needs is which lane is stuck and why.
+  var LEDGER_COLUMNS = [
+    { key: "laneId", label: "Lane" },
+    { key: "health", label: "State" },
+    { key: "agent", label: "Agent" },
+    { key: "human", label: "Person" },
+    { key: "evidence", label: "Evidence" },
+    { key: "review", label: "Review" },
+    { key: "risksOpen", label: "Risk" },
+    { key: "actionsUsed", label: "Actions" },
+    { key: "updatedAt", label: "Moved" }
+  ];
+  var ledgerSort = { column: "health", direction: "asc" };
+
+  function ledgerHead() {
+    return LEDGER_COLUMNS.map(function (column) {
+      var active = ledgerSort.column === column.key;
+      var cell = h("th", {
+        text: column.label,
+        title: "Sort by " + column.label.toLowerCase(),
+        on: { click: function () {
+          ledgerSort = active
+            ? { column: column.key, direction: ledgerSort.direction === "asc" ? "desc" : "asc" }
+            : { column: column.key, direction: "asc" };
+          loadLedger();
+        } }
+      });
+      if (active) {
+        cell.setAttribute("aria-sort", ledgerSort.direction === "asc" ? "ascending" : "descending");
+      }
+      return cell;
+    });
+  }
+
+  function ledgerRow(row) {
+    var moved = new Date(row.updatedAt).toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit" });
+    var body = h("tr", {},
+      h("td", {}, h("strong", { text: row.laneId }), h("div", { class: "ledger__why", text: row.title })),
+      h("td", {}, h("span", { class: "health health--" + row.health, text: row.health.replace(/-/g, " ") })),
+      h("td", { text: row.agent || "\u2014" }),
+      h("td", { text: row.human || "room" }),
+      h("td", { text: row.evidence.replace(/-/g, " ") }),
+      h("td", { text: row.review === "not-applicable" ? "\u2014" : row.review }),
+      h("td", { text: row.risksOpen === 0 ? "\u2014" : String(row.risksOpen) }),
+      h("td", { class: "ledger__cost", text: row.actionsUsed + "/" + row.actionBudget }),
+      h("td", { class: "ledger__cost", text: moved })
+    );
+    var why = h("tr", {}, h("td", {
+      attrs: { colspan: String(LEDGER_COLUMNS.length) },
+      class: "ledger__why",
+      text: row.blockedOn + (row.costSummary === "not counted" ? "" : "  \u00b7  " + row.costSummary)
+    }));
+    // The lane and its "what is in the way" line are one row to the eye, so the
+    // rule goes under the pair rather than between them.
+    for (var i = 0; i < body.childNodes.length; i++) body.childNodes[i].style.borderBottom = "0";
+    return [body, why];
+  }
+
+  function loadLedger() {
+    return api("/api/ledger?sort=" + ledgerSort.column + "&dir=" + ledgerSort.direction)
+      .then(function (payload) {
+        fill("ledger-head", ledgerHead(), "");
+        var nodes = [];
+        payload.rows.forEach(function (row) { ledgerRow(row).forEach(function (n) { nodes.push(n); }); });
+        fill("ledger-body", nodes, "");
+        var stuck = payload.rows.filter(function (row) { return row.health === "needs-a-person"; }).length;
+        $("ledger-count").textContent = stuck === 0
+          ? plural(payload.rows.length, "lane")
+          : stuck + " needing you \u00b7 " + plural(payload.rows.length, "lane");
+        // Q15: three kinds of fact, never one number.
+        $("ledger-cost").textContent = payload.cost.lines.length === 0
+          ? payload.cost.caveat
+          : payload.cost.lines.map(function (line) {
+              return line.provenance === "quota" && line.limit != null
+                ? line.amount + "/" + line.limit + " " + line.unit + " (quota)"
+                : line.amount + " " + line.unit + " (" + line.provenance + ")";
+            }).join("   \u00b7   ") + "   \u2014   " + payload.cost.caveat;
+      })
+      .catch(function () {});
   }
 
   // ------------------------------------------------------------------ parts
@@ -728,8 +921,15 @@ select.btn { padding-right: 8px; }
     $("room-goal").textContent = room.goal;
 
     var chip = $("plan-chip");
-    chip.className = "chip " + (PLAN_TONE[room.plan.status] || "");
-    chip.textContent = "plan · " + room.plan.status;
+    if (room.status === "closed") {
+      chip.className = "chip";
+      chip.textContent = "closed · " + (room.closedBy || "someone");
+      chip.title = room.closeNote || "This room is finished.";
+    } else {
+      chip.className = "chip " + (PLAN_TONE[room.plan.status] || "");
+      chip.textContent = "plan · " + room.plan.status;
+      chip.title = "";
+    }
 
     $("attention").classList.toggle("hide", view.attention.length === 0);
     fill("attention-list", view.attention.map(function (item) { return h("li", { text: item }); }), "");
@@ -747,6 +947,7 @@ select.btn { padding-right: 8px; }
     fill("decisions", room.decisions.map(decisionRow),
       "Nothing decided yet. The lead proposes the split and the seams.");
     fill("threads", room.threads.map(threadRow), "No one has needed to ask anything yet.");
+    renderRisks(room.riskList || []);
   }
 
   function pushEvent(event) {
@@ -760,7 +961,9 @@ select.btn { padding-right: 8px; }
     while (feed.childNodes.length > 150) feed.lastChild.remove();
   }
 
-  function refresh() { return api("/api/room").then(render); }
+  function refresh() {
+    return api("/api/room").then(render).then(loadLedger);
+  }
 
   function connect() {
     if (stream) stream.close();

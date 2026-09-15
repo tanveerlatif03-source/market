@@ -10,10 +10,12 @@ import {
   unclaimedChanges
 } from './claims.ts';
 import type { Claim, ClaimHolderActivity, ClaimState } from './claims.ts';
-import { DEFAULT_MESSAGE_BUDGET, HUMAN_ID, PLAN_TASK_ID } from './seed.ts';
+import { DEFAULT_MESSAGE_BUDGET, HUMAN_ID, OWNER_ID, PLAN_TASK_ID } from './seed.ts';
 import { agentRoomView, supervisorRoomView } from './views.ts';
 import type { AgentRoomView, SupervisorRoomView } from './views.ts';
 import { OPENS_TO_ROOM_AFTER_MS, canAnswer, queueFor } from './attention.ts';
+import { canDo, describeAction } from './rights.ts';
+import type { RoomAction } from './rights.ts';
 import type { AttentionItem, AttentionQueue } from './attention.ts';
 import { assessStuck, detectSpin } from './spin.ts';
 import type { StuckVerdict } from './spin.ts';
@@ -27,6 +29,12 @@ import {
 import type { Review, ReviewRequirement, ReviewVerdict, RiskRule } from './review.ts';
 import { provenanceOf } from './provenance.ts';
 import type { Provenance, ProvenanceSubject } from './provenance.ts';
+import { costReport, quotaWarnings } from './cost.ts';
+import type { CostEntry, CostProvenance, CostReport } from './cost.ts';
+import { DEFAULT_SORT, ledgerRows, sortRows } from './ledger.ts';
+import type { LedgerRow, LedgerSort } from './ledger.ts';
+import { archiveOf, closeReadiness } from './close.ts';
+import type { CloseReadiness, RoomArchive } from './close.ts';
 import type {
   Dissent,
   Human,
@@ -52,6 +60,8 @@ const MAX_MESSAGE_CHARS = 2000;
 export interface Principal {
   kind: 'agent' | 'supervisor';
   agentId: string | null;
+  /** For a supervisor token: the person it acts as, and therefore its rights (Q16). */
+  humanId: string | null;
   label: string;
   tokenId: string;
 }
@@ -143,6 +153,24 @@ export interface SubmitWorkResult {
 
 type EmitFn = (event: Omit<RoomEvent, 'seq' | 'at'>) => void;
 
+/**
+ * Work that belongs to a mutation that failed, and must outlive it. A refusal
+ * rolls its own mutation back — so anything the refusal itself produced (the
+ * lane that stopped, the person who was told) has to be re-applied afterwards.
+ */
+type Repair = (data: AgoraData, emit: EmitFn) => void;
+
+const REPAIR = Symbol('agora.repair');
+
+function attachRepair(error: AgoraError, repair: Repair): void {
+  (error as AgoraError & { [REPAIR]?: Repair })[REPAIR] = repair;
+}
+
+function repairOf(error: unknown): Repair | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  return (error as { [REPAIR]?: Repair })[REPAIR];
+}
+
 function unique(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
@@ -190,6 +218,12 @@ export class RoomService {
       return {
         kind: record.kind,
         agentId: record.agentId,
+        // A token minted before people were named acts as whoever opened the
+        // room — which is the only person there was at the time.
+        humanId:
+          record.kind === 'supervisor'
+            ? (record.humanId ?? data.room.humans[0]?.id ?? OWNER_ID)
+            : null,
         label: record.label,
         tokenId: record.id
       } satisfies Principal;
@@ -770,23 +804,28 @@ export class RoomService {
     return this.store.read((data) => supervisorRoomView(data.room));
   }
 
-  async setGoal(goal: string): Promise<Room> {
-    return this.apply((data) => {
+  async setGoal(by: string, goal: string): Promise<Room> {
+    return this.apply((data, emit) => {
+      this.requireRight(data.room, by, 'set-goal', emit);
       data.room.goal = goal;
       return data.room;
     });
   }
 
-  async addAgent(options: {
-    id?: string;
-    displayName: string;
-    provider: string;
-    role: 'lead' | 'peer';
-    scope?: Partial<AgentScope>;
-  }): Promise<{ agent: Agent; token: string }> {
+  async addAgent(
+    by: string,
+    options: {
+      id?: string;
+      displayName: string;
+      provider: string;
+      role: 'lead' | 'peer';
+      scope?: Partial<AgentScope>;
+    }
+  ): Promise<{ agent: Agent; token: string }> {
     const token = newToken();
     const agent = await this.apply((data, emit) => {
       const room = data.room;
+      this.requireRight(room, by, 'add-agent', emit);
       const id = slugify(options.id ?? options.displayName, 'agent');
       if (room.agents.some((existing) => existing.id === id)) {
         throw new AgoraError('INVALID', `An agent "${id}" is already in this room.`, 'Pick another id.');
@@ -842,13 +881,35 @@ export class RoomService {
     return { agent, token };
   }
 
-  async createSupervisorToken(label: string): Promise<string> {
+  /**
+   * Mints a token for a person. It carries that person's rights and no more —
+   * you cannot hand out access above your own level, which is the only way the
+   * merge line survives contact with a token (Q16).
+   */
+  async createSupervisorToken(by: string, label: string, forHuman?: string): Promise<string> {
     const token = newToken();
-    await this.apply((data) => {
+    await this.apply((data, emit) => {
+      const room = data.room;
+      const subject = forHuman ?? by;
+      const target = room.humans.find((human) => human.id === subject);
+      this.requireRight(
+        room,
+        by,
+        target?.canMerge === true ? 'mint-merge-token' : 'mint-token',
+        emit
+      );
+      if (target === undefined) {
+        throw new AgoraError(
+          'NOT_FOUND',
+          `No one called ${subject} is in this room.`,
+          'Add them first; anyone in the room can.'
+        );
+      }
       data.tokens.push({
         id: shortId('tok'),
         kind: 'supervisor',
         agentId: null,
+        humanId: target.id,
         label,
         hash: hashToken(token),
         createdAt: nowIso(),
@@ -858,9 +919,10 @@ export class RoomService {
     return token;
   }
 
-  async approvePlan(note: string | null = null): Promise<Room> {
+  async approvePlan(by: string, note: string | null = null): Promise<Room> {
     return this.apply((data, emit) => {
       const room = data.room;
+      const human = this.requireRight(room, by, 'approve-plan', emit);
       if (room.plan.status !== 'proposed') {
         throw new AgoraError(
           'INVALID',
@@ -881,7 +943,7 @@ export class RoomService {
 
       const at = nowIso();
       room.plan.status = 'approved';
-      room.plan.decidedBy = HUMAN_ID;
+      room.plan.decidedBy = human.id;
       room.plan.decidedAt = at;
       room.plan.note = note;
       for (const task of room.tasks) {
@@ -897,19 +959,20 @@ export class RoomService {
       }
       emit({
         type: 'plan.approved',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: null,
         threadId: null,
-        summary: 'The human approved the plan. Everyone is a peer executing now.',
+        summary: `${human.displayName} approved the plan. Everyone is a peer executing now.`,
         audience: []
       });
       return room;
     });
   }
 
-  async rejectPlan(note: string): Promise<Room> {
+  async rejectPlan(by: string, note: string): Promise<Room> {
     return this.apply((data, emit) => {
       const room = data.room;
+      const human = this.requireRight(room, by, 'reject-plan', emit);
       if (room.plan.status !== 'proposed') {
         throw new AgoraError(
           'INVALID',
@@ -918,7 +981,7 @@ export class RoomService {
         );
       }
       room.plan.status = 'rejected';
-      room.plan.decidedBy = HUMAN_ID;
+      room.plan.decidedBy = human.id;
       room.plan.decidedAt = nowIso();
       room.plan.note = note;
       const planTask = room.tasks.find((task) => task.id === PLAN_TASK_ID);
@@ -928,52 +991,55 @@ export class RoomService {
       }
       emit({
         type: 'plan.rejected',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: PLAN_TASK_ID,
         threadId: null,
-        summary: `The human rejected the plan: ${note}`,
+        summary: `${human.displayName} rejected the plan: ${note}`,
         audience: []
       });
       return room;
     });
   }
 
-  async pauseAgent(agentId: string, reason: string): Promise<Agent> {
+  async pauseAgent(by: string, agentId: string, reason: string): Promise<Agent> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'pause-agent', emit);
       const agent = this.agentOf(data, agentId);
       agent.paused = true;
       agent.pausedReason = reason;
       emit({
         type: 'agent.paused',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: agent.status.taskId,
         threadId: null,
-        summary: `The human paused ${agent.displayName}: ${reason}`,
+        summary: `${human.displayName} paused ${agent.displayName}: ${reason}`,
         audience: [agent.id]
       });
       return agent;
     });
   }
 
-  async resumeAgent(agentId: string): Promise<Agent> {
+  async resumeAgent(by: string, agentId: string): Promise<Agent> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'resume-agent', emit);
       const agent = this.agentOf(data, agentId);
       agent.paused = false;
       agent.pausedReason = null;
       emit({
         type: 'agent.resumed',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: agent.status.taskId,
         threadId: null,
-        summary: `The human resumed ${agent.displayName}.`,
+        summary: `${human.displayName} resumed ${agent.displayName}.`,
         audience: [agent.id]
       });
       return agent;
     });
   }
 
-  async setAgentScope(agentId: string, scope: Partial<AgentScope>): Promise<Agent> {
+  async setAgentScope(by: string, agentId: string, scope: Partial<AgentScope>): Promise<Agent> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'set-agent-scope', emit);
       const agent = this.agentOf(data, agentId);
       agent.scope = {
         readPaths: scope.readPaths ?? agent.scope.readPaths,
@@ -981,10 +1047,10 @@ export class RoomService {
       };
       emit({
         type: 'agent.scope',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: null,
         threadId: null,
-        summary: `The human changed ${agent.displayName}'s scope.`,
+        summary: `${human.displayName} changed ${agent.displayName}'s scope.`,
         audience: [agent.id]
       });
       return agent;
@@ -992,9 +1058,10 @@ export class RoomService {
   }
 
   /** Take a task off one agent and give it to another. */
-  async assignTask(taskId: string, agentId: string): Promise<Task> {
+  async assignTask(by: string, taskId: string, agentId: string): Promise<Task> {
     return this.apply((data, emit) => {
       const room = data.room;
+      const human = this.requireRight(room, by, 'assign-lane', emit);
       const task = this.taskOf(room, taskId);
       const agent = this.agentOf(data, agentId);
       if (task.status === 'accepted') {
@@ -1013,38 +1080,40 @@ export class RoomService {
       task.updatedAt = at;
       emit({
         type: 'task.assigned',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: task.id,
         threadId: null,
         summary:
           previous === null
-            ? `The human gave "${task.id}" to ${agent.displayName}.`
-            : `The human moved "${task.id}" from ${previous} to ${agent.displayName}.`,
+            ? `${human.displayName} gave "${task.id}" to ${agent.displayName}.`
+            : `${human.displayName} moved "${task.id}" from ${previous} to ${agent.displayName}.`,
         audience: unique([agent.id, ...(previous !== null ? [previous] : [])])
       });
       return task;
     });
   }
 
-  async acceptTask(taskId: string): Promise<Task> {
+  async acceptTask(by: string, taskId: string): Promise<Task> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'accept-lane', emit);
       const task = this.taskOf(data.room, taskId);
       task.status = 'accepted';
       task.updatedAt = nowIso();
       emit({
         type: 'task.accepted',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: task.id,
         threadId: null,
-        summary: `The human accepted "${task.id}".`,
+        summary: `${human.displayName} accepted "${task.id}".`,
         audience: task.owner !== null ? [task.owner] : []
       });
       return task;
     });
   }
 
-  async reopenTask(taskId: string, keepOwner = false): Promise<Task> {
+  async reopenTask(by: string, taskId: string, keepOwner = false): Promise<Task> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'reopen-lane', emit);
       const task = this.taskOf(data.room, taskId);
       const previous = task.owner;
       task.status = keepOwner && task.owner !== null ? 'claimed' : 'open';
@@ -1056,10 +1125,10 @@ export class RoomService {
       task.updatedAt = nowIso();
       emit({
         type: 'task.reopened',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: task.id,
         threadId: null,
-        summary: `The human reopened "${task.id}".`,
+        summary: `${human.displayName} reopened "${task.id}".`,
         audience: unique([...(previous !== null ? [previous] : []), ...(task.owner !== null ? [task.owner] : [])])
       });
       return task;
@@ -1067,8 +1136,9 @@ export class RoomService {
   }
 
   /** Raise a task's message budget and let it start talking again. */
-  async setTaskBudget(taskId: string, actionBudget: number): Promise<Task> {
+  async setTaskBudget(by: string, taskId: string, actionBudget: number): Promise<Task> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'raise-budget', emit);
       const task = this.taskOf(data.room, taskId);
       if (!Number.isInteger(actionBudget) || actionBudget < 0) {
         throw new AgoraError('INVALID', 'A message budget is a non-negative integer.', 'Pass a whole number.');
@@ -1078,10 +1148,10 @@ export class RoomService {
       task.updatedAt = nowIso();
       emit({
         type: 'task.budget',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: task.id,
         threadId: null,
-        summary: `The human set the message budget for "${task.id}" to ${actionBudget}.`,
+        summary: `${human.displayName} set the message budget for "${task.id}" to ${actionBudget}.`,
         audience: task.owner !== null ? [task.owner] : []
       });
       return task;
@@ -1089,7 +1159,7 @@ export class RoomService {
   }
 
   /** The human answering, or redirecting, inside a thread. Never charged to the budget. */
-  async postAsHuman(input: {
+  async postAsHuman(by: string, input: {
     taskId: string;
     to?: string[];
     threadId?: string;
@@ -1099,6 +1169,7 @@ export class RoomService {
   }): Promise<PostMessageResult> {
     return this.apply((data, emit) => {
       const room = data.room;
+      this.requireRight(room, by, 'post-message', emit);
       const task = this.taskOf(room, input.taskId);
       const humanAgent: Agent = {
         id: HUMAN_ID,
@@ -1146,25 +1217,26 @@ export class RoomService {
     });
   }
 
-  async recordDecision(input: { title: string; body: string }): Promise<Decision> {
+  async recordDecision(by: string, input: { title: string; body: string }): Promise<Decision> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'record-decision', emit);
       const decision: Decision = {
         id: shortId('dec'),
         kind: 'general',
         title: input.title,
         body: input.body,
         seam: null,
-        proposedBy: HUMAN_ID,
+        proposedBy: human.id,
         createdAt: nowIso(),
         version: 1
       };
       data.room.decisions.push(decision);
       emit({
         type: 'decision.recorded',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: null,
         threadId: null,
-        summary: `The human recorded a decision: ${input.title}`,
+        summary: `${human.displayName} recorded a decision: ${input.title}`,
         audience: []
       });
       return decision;
@@ -1415,13 +1487,22 @@ export class RoomService {
    */
   private spendAction(room: Room, task: Task, emit: EmitFn): void {
     if (task.actionsUsed >= task.actionBudget) {
-      this.haltOnBudget(room, task, emit);
-      throw new AgoraError(
+      const error = new AgoraError(
         'BUDGET_EXHAUSTED',
         `"${task.id}" has spent all ${task.actionBudget} of its actions.`,
         'Stop and wait. The human has been asked to raise the budget or redirect the work.',
         { actionBudget: task.actionBudget, actionsUsed: task.actionsUsed }
       );
+      // A lane that stops has to reach a person, and this refusal discards
+      // everything written alongside it — so the halt is applied afterwards,
+      // against state that still exists. A lane stopping quietly is the one
+      // outcome Phase 2 rules out.
+      const taskId = task.id;
+      attachRepair(error, (data, repairEmit) => {
+        const live = data.room.tasks.find((candidate) => candidate.id === taskId);
+        if (live !== undefined) this.haltOnBudget(data.room, live, repairEmit);
+      });
+      throw error;
     }
     task.actionsUsed += 1;
     task.updatedAt = nowIso();
@@ -1482,11 +1563,13 @@ export class RoomService {
    * they are woken now rather than finding out at merge.
    */
   async amendSeam(
+    by: string,
     decisionId: string,
     input: { body: string; note?: string }
   ): Promise<{ decision: Decision; stale: string[] }> {
     return this.apply((data, emit) => {
       const room = data.room;
+      const human = this.requireRight(room, by, 'amend-contract', emit);
       const decision = room.decisions.find((candidate) => candidate.id === decisionId);
       if (decision === undefined) {
         throw new AgoraError('NOT_FOUND', `No decision "${decisionId}".`, 'Use an id from read_room.');
@@ -1512,7 +1595,7 @@ export class RoomService {
 
       emit({
         type: 'seam.amended',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: null,
         threadId: null,
         summary:
@@ -1529,11 +1612,13 @@ export class RoomService {
 
   /** The human correcting a drafted plan before approving it (Q10). */
   async editPlannedLane(
+    by: string,
     taskId: string,
     edits: { title?: string; description?: string; paths?: string[]; evidence?: string | null; actionBudget?: number; suggestedOwner?: string | null }
   ): Promise<Task> {
     return this.apply((data, emit) => {
       const room = data.room;
+      this.requireRight(room, by, 'edit-lane', emit);
       const task = this.taskOf(room, taskId);
       if (task.status !== 'draft') {
         throw new AgoraError(
@@ -1577,9 +1662,13 @@ export class RoomService {
   // ----------------------------------------------------- people and attention
 
   /** Adds a person to the room. Merge rights mirror the repository (Q16). */
-  async addHuman(input: { id: string; displayName: string; canMerge: boolean }): Promise<Human> {
+  async addHuman(
+    by: string,
+    input: { id: string; displayName: string; canMerge: boolean }
+  ): Promise<Human> {
     return this.apply((data, emit) => {
       const room = data.room;
+      this.requireRight(room, by, 'add-human', emit);
       if (room.humans.some((human) => human.id === input.id)) {
         throw new AgoraError('INVALID', `${input.id} is already in this room.`, 'Pick another id.');
       }
@@ -1604,8 +1693,9 @@ export class RoomService {
   }
 
   /** Names the person who answers for a lane first (Q8). */
-  async assignLaneOwner(taskId: string, humanId: string | null): Promise<Task> {
+  async assignLaneOwner(by: string, taskId: string, humanId: string | null): Promise<Task> {
     return this.apply((data, emit) => {
+      this.requireRight(data.room, by, 'name-lane-owner', emit);
       const task = this.taskOf(data.room, taskId);
       if (humanId !== null && !data.room.humans.some((human) => human.id === humanId)) {
         throw new AgoraError('NOT_FOUND', `No one called ${humanId} is in this room.`, 'Add them first.');
@@ -1614,7 +1704,7 @@ export class RoomService {
       task.updatedAt = nowIso();
       emit({
         type: 'attention.opened',
-        actor: HUMAN_ID,
+        actor: by,
         taskId: task.id,
         threadId: null,
         summary:
@@ -1707,6 +1797,80 @@ export class RoomService {
       });
 
       return { item, message: `Settled. ${option.effect}` };
+    });
+  }
+
+  /**
+   * Taking a question that is named to someone else (Q7, Q8).
+   *
+   * The fifteen-minute timer is the automatic path, for when nobody says
+   * anything. This is the human one: a second person walks in, sees the first
+   * is not around, and says they have it. Without it, someone who is standing
+   * right there has to wait out a timer designed for someone who is asleep.
+   *
+   * It takes exactly the rights the question itself takes, so taking something
+   * is never a way round the merge line.
+   */
+  async takeAttention(
+    humanId: string,
+    input: { itemId: string; because?: string }
+  ): Promise<{ item: AttentionItem; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const human = room.humans.find((candidate) => candidate.id === humanId);
+      if (human === undefined) {
+        throw new AgoraError('UNAUTHORIZED', `${humanId} is not in this room.`, 'Ask to be added.');
+      }
+      const item = room.attention.find((candidate) => candidate.id === input.itemId);
+      if (item === undefined) {
+        throw new AgoraError('NOT_FOUND', `No open question "${input.itemId}".`, 'It may already be settled.');
+      }
+      if (item.resolvedAt !== null) {
+        throw new AgoraError(
+          'INVALID',
+          `${item.resolvedBy ?? 'Someone'} already settled that one.`,
+          'Nothing to take.'
+        );
+      }
+      if (item.needsMergeRights && !human.canMerge) {
+        throw new AgoraError(
+          'UNAUTHORIZED',
+          canDo(human, 'approve-plan').why,
+          'Someone with merge rights has to take this one.'
+        );
+      }
+      if (item.assignedTo === humanId) {
+        return { item, message: 'It was already yours.' };
+      }
+
+      const from = item.assignedTo;
+      const fromName =
+        from === null
+          ? null
+          : (room.humans.find((candidate) => candidate.id === from)?.displayName ?? from);
+      item.assignedTo = humanId;
+      item.opensToRoomAt = new Date(Date.now() + OPENS_TO_ROOM_AFTER_MS).toISOString();
+      human.lastSeenAt = nowIso();
+
+      emit({
+        type: 'attention.opened',
+        actor: humanId,
+        taskId: item.laneId,
+        threadId: null,
+        summary:
+          `${human.displayName} took "${item.title}"` +
+          (fromName === null ? ' from the room.' : ` from ${fromName}.`) +
+          (input.because !== undefined ? ` ${input.because}` : ''),
+        audience: from === null ? [] : [from]
+      });
+
+      return {
+        item,
+        message:
+          fromName === null
+            ? 'Yours. Nobody else will pick it up.'
+            : `Yours. ${fromName} has been told, in case they were halfway through it.`
+      };
     });
   }
 
@@ -1954,12 +2118,13 @@ export class RoomService {
   }
 
   /** The surfaces that always pull a person in (Q13). The human's call, not an agent's. */
-  async setRiskList(rules: RiskRule[]): Promise<RiskRule[]> {
+  async setRiskList(by: string, rules: RiskRule[]): Promise<RiskRule[]> {
     return this.apply((data, emit) => {
+      const human = this.requireRight(data.room, by, 'set-risk-list', emit);
       data.room.riskList = rules.map((rule) => ({ ...rule, paths: [...rule.paths] }));
       emit({
         type: 'risk.flagged',
-        actor: HUMAN_ID,
+        actor: human.id,
         taskId: null,
         threadId: null,
         summary:
@@ -2056,6 +2221,172 @@ export class RoomService {
     });
   }
 
+  // --------------------------------------------------- cost, ledger, closing
+
+  /**
+   * Records what something cost, with where the figure came from (Q15).
+   *
+   * Nothing here converts between provenances or adds them up. A tool's own
+   * token count and a quota reading are different kinds of fact about the same
+   * work, and the moment they are blended the number stops meaning anything.
+   */
+  async recordCost(
+    agentId: string,
+    input: {
+      laneId?: string;
+      provenance: CostProvenance;
+      amount: number;
+      unit: string;
+      limit?: number;
+      note?: string;
+    }
+  ): Promise<{ entry: CostEntry; report: CostReport; warnings: string[] }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      if (!Number.isFinite(input.amount) || input.amount < 0) {
+        throw new AgoraError(
+          'INVALID',
+          'A cost is a non-negative number.',
+          'Report what you actually counted, or do not report it.'
+        );
+      }
+      if (input.provenance === 'quota' && input.limit === undefined) {
+        throw new AgoraError(
+          'INVALID',
+          'A quota reading needs the ceiling as well as the level.',
+          'Pass "limit" — a quota with no limit says nothing about what is left.'
+        );
+      }
+
+      const entry: CostEntry = {
+        id: shortId('cost'),
+        laneId: input.laneId ?? null,
+        agentId,
+        provenance: input.provenance,
+        amount: input.amount,
+        unit: input.unit,
+        limit: input.provenance === 'quota' ? (input.limit as number) : null,
+        note: input.note ?? '',
+        at: nowIso()
+      };
+      room.costs.push(entry);
+
+      const report = costReport(room.costs, entry.laneId);
+      const warnings = quotaWarnings(report);
+
+      emit({
+        type: 'cost.reported',
+        actor: agentId,
+        taskId: entry.laneId,
+        threadId: null,
+        summary:
+          `${agent.displayName} reported ${entry.amount} ${entry.unit} (${entry.provenance})` +
+          (entry.laneId !== null ? ` on "${entry.laneId}".` : ' for the room.'),
+        audience: []
+      });
+
+      // A quota is the one that actually stops the work, so it reaches a person
+      // before it runs out rather than after.
+      if (warnings.length > 0 && entry.laneId !== null) {
+        const already = room.attention.some(
+          (item) => item.kind === 'budget' && item.laneId === entry.laneId && item.resolvedAt === null
+        );
+        if (!already) {
+          this.raise(room, emit, {
+            kind: 'budget',
+            laneId: entry.laneId,
+            title: `${agent.displayName} is nearly out of quota`,
+            detail: warnings.join(' '),
+            needsMergeRights: false,
+            options: [
+              { id: 'carry-on', label: 'Carry on', effect: 'The lane keeps going until the quota actually runs out.' },
+              { id: 'reassign', label: 'Move the lane', effect: 'Another agent, on another plan, picks it up.' },
+              { id: 'pause', label: 'Pause it', effect: 'The lane stops now rather than halfway through something.' }
+            ]
+          });
+        }
+      }
+
+      return { entry, report, warnings };
+    });
+  }
+
+  /** What has been counted, per provenance, never as one number (Q15). */
+  costFor(laneId: string | null = null): CostReport {
+    return this.store.read((data) => costReport(data.room.costs, laneId));
+  }
+
+  /** Every lane on one screen, worst first (Q19). */
+  ledger(sort: LedgerSort = DEFAULT_SORT): LedgerRow[] {
+    return this.store.read((data) => sortRows(ledgerRows(data.room), sort));
+  }
+
+  /** Whether this room can close, and what is in the way (Q24). */
+  closeReadiness(landed: readonly string[] = []): CloseReadiness {
+    return this.store.read((data) => closeReadiness({ room: data.room, landed }));
+  }
+
+  /**
+   * Closes the room. The same gate as everything else, with a person
+   * confirming rather than a timer deciding (Q24).
+   */
+  async closeRoom(
+    by: string,
+    input: { landed: readonly string[]; note?: string; force?: boolean }
+  ): Promise<{ room: Room; archive: RoomArchive }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const human = this.requireRight(room, by, 'close-room', emit);
+      if (room.status === 'closed') {
+        throw new AgoraError(
+          'INVALID',
+          `This room was closed by ${room.closedBy ?? 'someone'} already.`,
+          'Open a new room; its contracts can be seeded from this one.'
+        );
+      }
+
+      const readiness = closeReadiness({ room, landed: input.landed });
+      if (!readiness.ready && input.force !== true) {
+        throw new AgoraError(
+          'INVALID',
+          readiness.summary,
+          'Finish those, or close it anyway with force — which is on the record as a choice.',
+          { blockers: readiness.blockers }
+        );
+      }
+
+      const at = nowIso();
+      room.status = 'closed';
+      room.closedAt = at;
+      room.closedBy = human.id;
+      room.closeNote =
+        readiness.ready
+          ? (input.note ?? '')
+          : `${input.note ?? ''} (Closed with ${readiness.blockers.length} thing(s) unfinished.)`.trim();
+
+      emit({
+        type: 'room.closed',
+        actor: human.id,
+        taskId: null,
+        threadId: null,
+        summary:
+          readiness.ready
+            ? `${human.displayName} closed the room. ${readiness.summary}`
+            : `${human.displayName} closed the room with ${readiness.blockers.length} thing(s) unfinished.`,
+        audience: []
+      });
+
+      return { room, archive: archiveOf(room) };
+    });
+  }
+
+  /** The room as it will be remembered: why the code is like this, and what to reuse. */
+  archive(): RoomArchive {
+    return this.store.read((data) => archiveOf(data.room));
+  }
+
   /** Puts something in front of a person, named if the lane has an owner (Q8). */
   private raise(
     room: Room,
@@ -2106,20 +2437,87 @@ export class RoomService {
   // ------------------------------------------------------------- internals
 
   private async apply<T>(fn: (data: AgoraData, emit: EmitFn) => T): Promise<T> {
-    const outcome = await this.store.mutate((data) => {
-      const emitted: RoomEvent[] = [];
+    let outcome;
+    try {
+      outcome = await this.store.mutate((data) => {
+        const emitted: RoomEvent[] = [];
+        const emit: EmitFn = (partial) => {
+          data.room.eventSeq += 1;
+          const event: RoomEvent = { seq: data.room.eventSeq, at: nowIso(), ...partial };
+          data.room.events.push(event);
+          emitted.push(event);
+        };
+        const value = fn(data, emit);
+        data.room.updatedAt = nowIso();
+        return { value, emitted };
+      });
+    } catch (error) {
+      // Some refusals have to leave something behind: the person who was
+      // refused, or the lane that just stopped. Nothing written inside the
+      // failed mutation survives it, so that work rides on the error and is
+      // applied here, against fresh state, once the rollback is done.
+      const repair = repairOf(error);
+      if (repair !== undefined) await this.applyRepair(repair);
+      throw error;
+    }
+    for (const event of outcome.emitted) this.bus.emit(event);
+    return outcome.value;
+  }
+
+  /** Runs the part of a failed mutation that has to survive it. */
+  private async applyRepair(repair: Repair): Promise<void> {
+    const emitted = await this.store.mutate((data) => {
+      const events: RoomEvent[] = [];
       const emit: EmitFn = (partial) => {
         data.room.eventSeq += 1;
         const event: RoomEvent = { seq: data.room.eventSeq, at: nowIso(), ...partial };
         data.room.events.push(event);
-        emitted.push(event);
+        events.push(event);
       };
-      const value = fn(data, emit);
+      repair(data, emit);
       data.room.updatedAt = nowIso();
-      return { value, emitted };
+      return events;
     });
-    for (const event of outcome.emitted) this.bus.emit(event);
-    return outcome.value;
+    for (const event of emitted) this.bus.emit(event);
+  }
+
+  /**
+   * The one permission check in Agora (Q16). It refuses by saying what the
+   * person *can* do, because a refusal that only says no teaches people to stop
+   * reading refusals.
+   */
+  private requireRight(room: Room, by: string, action: RoomAction, _emit: EmitFn): Human {
+    const human = room.humans.find((candidate) => candidate.id === by);
+    const verdict = canDo(human, action);
+    if (!verdict.allowed || human === undefined) {
+      // The refusal rolls the whole mutation back, so the event cannot be
+      // emitted here — it would be discarded with everything else. It rides on
+      // the error instead, and `apply` writes it once the mutation is gone.
+      const error = new AgoraError(
+        'UNAUTHORIZED',
+        verdict.why,
+        'Ask someone with merge rights on the repository.',
+        { action, by }
+      );
+      attachRepair(error, (_data, emit) => {
+        emit({
+          type: 'rights.refused',
+          actor: by,
+          taskId: null,
+          threadId: null,
+          summary: `${by} tried ${describeAction(action)} without the rights for it.`,
+          audience: []
+        });
+      });
+      throw error;
+    }
+    human.lastSeenAt = nowIso();
+    return human;
+  }
+
+  /** Who is in the room, and what each of them may do. */
+  humans(): Human[] {
+    return this.store.read((data) => data.room.humans);
   }
 
   private agentOf(data: AgoraData, agentId: string): Agent {

@@ -3,6 +3,7 @@ import type { RoomService } from '../src/room/service.ts';
 import type { PlanProposal } from '../src/room/service.ts';
 import { isAgoraError } from '../src/errors.ts';
 import type { AgoraErrorCode } from '../src/errors.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 export const AUTH_PAGE_PLAN: PlanProposal = {
   summary: 'Two lanes that meet at one HTTP contract.',
@@ -59,19 +60,19 @@ export async function twoAgentRoom(): Promise<{
     name: 'Auth page',
     goal: 'Ship a working auth page.'
   });
-  const lead = await service.addAgent({
+  const lead = await service.addAgent(OWNER_ID, {
     id: 'claude',
     displayName: 'Claude',
     provider: 'claude-code',
     role: 'lead'
   });
-  const peer = await service.addAgent({
+  const peer = await service.addAgent(OWNER_ID, {
     id: 'cursor',
     displayName: 'Cursor',
     provider: 'cursor',
     role: 'peer'
   });
-  const supervisorToken = await service.createSupervisorToken('test');
+  const supervisorToken = await service.createSupervisorToken(OWNER_ID, 'test');
   return {
     service,
     claude: lead.agent.id,
@@ -94,7 +95,7 @@ export async function roomWithApprovedPlan(): Promise<
     outcome: 'needs-review',
     plan: AUTH_PAGE_PLAN
   });
-  await room.service.approvePlan('Looks right.');
+  await room.service.approvePlan(OWNER_ID, 'Looks right.');
   const snapshot = room.service.snapshot();
   const ui = snapshot.tasks.find((task) => task.title === 'Auth page UI');
   const api = snapshot.tasks.find((task) => task.title === 'Auth API route');

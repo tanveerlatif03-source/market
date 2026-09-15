@@ -6,6 +6,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { createAgentMcpServer } from '../mcp/server.ts';
 import type { AgentMcpServer } from '../mcp/server.ts';
 import type { RoomService } from '../room/service.ts';
+import { OWNER_ID } from '../room/seed.ts';
 import { dashboardHtml } from './dashboard.ts';
 import { handleSupervisorRequest } from './supervisor.ts';
 import { bearerToken, queryToken, readJsonBody, sendError, sendJson } from './util.ts';
@@ -134,7 +135,13 @@ export function createAgoraServer(service: RoomService, options: AgoraServerOpti
       });
       return;
     }
-    const handled = await handleSupervisorRequest(service, req, res, url);
+    const handled = await handleSupervisorRequest(
+      service,
+      principal.humanId ?? OWNER_ID,
+      req,
+      res,
+      url
+    );
     if (!handled) {
       sendJson(res, 404, { error: { code: 'NOT_FOUND', message: `No route ${req.method} ${url.pathname}.` } });
     }

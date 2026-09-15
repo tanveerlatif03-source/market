@@ -8,6 +8,7 @@ import { MergeGate } from '../src/gate/gate.ts';
 import { checkout, git, openRepo } from '../src/git/repo.ts';
 import type { Repo } from '../src/git/repo.ts';
 import type { RoomService } from '../src/room/service.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 /**
  * Phase 1's acceptance test.
@@ -74,8 +75,8 @@ async function stage(): Promise<Stage> {
     name: 'Checkout rebuild',
     goal: 'Replace checkout with a three-step wizard.'
   });
-  await service.addAgent({ id: 'claude', displayName: 'Claude', provider: 'claude-code', role: 'lead' });
-  await service.addAgent({ id: 'cursor', displayName: 'Cursor', provider: 'cursor', role: 'peer' });
+  await service.addAgent(OWNER_ID, { id: 'claude', displayName: 'Claude', provider: 'claude-code', role: 'lead' });
+  await service.addAgent(OWNER_ID, { id: 'cursor', displayName: 'Cursor', provider: 'cursor', role: 'peer' });
 
   await service.claimTask('claude', { taskId: 'plan' });
   await service.submitWork('claude', {
@@ -115,10 +116,10 @@ async function stage(): Promise<Stage> {
       ]
     }
   });
-  await service.approvePlan('Good split.');
+  await service.approvePlan(OWNER_ID, 'Good split.');
   // Phase 1 predates the risk list (Q13). Empty here so these tests stay about
   // the territory rule; test/phase2.test.ts is where the risk list is exercised.
-  await service.setRiskList([]);
+  await service.setRiskList(OWNER_ID, []);
 
   const room = service.snapshot();
   const wizard = room.tasks.find((t) => t.title === 'Checkout wizard')?.id as string;
@@ -330,7 +331,7 @@ describe('Phase 1 — moving a contract takes the work with it', () => {
       if (event.type === 'seam.amended') woken.push(event.audience);
     });
 
-    const amended = await s.service.amendSeam(s.seamId, {
+    const amended = await s.service.amendSeam(OWNER_ID, s.seamId, {
       body: 'getQuote(cart) resolves to {subtotal, tax, total, currency}. Currency is required.'
     });
 
@@ -344,7 +345,7 @@ describe('Phase 1 — moving a contract takes the work with it', () => {
     assert.match(stale.detail, /v2 after this lane signed v1/);
 
     // Re-confirming against the new version clears it.
-    await s.service.reopenTask(s.wizard, true);
+    await s.service.reopenTask(OWNER_ID, s.wizard, true);
     await s.service.submitWork('claude', {
       taskId: s.wizard,
       summary: 'Re-read the contract; currency added.',

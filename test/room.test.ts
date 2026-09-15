@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { AUTH_PAGE_PLAN, refusal, roomWithApprovedPlan, twoAgentRoom } from './helpers.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 describe('the plan', () => {
   it('only the lead proposes it', async () => {
@@ -28,7 +29,7 @@ describe('the plan', () => {
     assert.ok(ui);
     await refusal(() => room.service.claimTask(room.cursor, { taskId: ui.id }), 'PLAN_NOT_APPROVED');
 
-    await room.service.approvePlan();
+    await room.service.approvePlan(OWNER_ID);
     const approved = room.service.snapshot();
     assert.equal(approved.plan.status, 'approved');
     assert.equal(approved.tasks.filter((task) => task.status === 'open').length, 2);
@@ -73,7 +74,7 @@ describe('the plan', () => {
       outcome: 'needs-review',
       plan: AUTH_PAGE_PLAN
     });
-    await room.service.rejectPlan('Split the session store out too.');
+    await room.service.rejectPlan(OWNER_ID, 'Split the session store out too.');
 
     await room.service.submitWork(room.claude, {
       taskId: 'plan',
@@ -145,7 +146,7 @@ describe('ownership', () => {
   it('lets the human move a task from one agent to another', async () => {
     const room = await roomWithApprovedPlan();
     await room.service.claimTask(room.claude, { taskId: room.ui });
-    const moved = await room.service.assignTask(room.ui, room.cursor);
+    const moved = await room.service.assignTask(OWNER_ID, room.ui, room.cursor);
 
     assert.equal(moved.owner, room.cursor);
     assert.equal(moved.status, 'claimed');
@@ -155,7 +156,7 @@ describe('ownership', () => {
 
   it('honours a narrowed permission scope', async () => {
     const room = await roomWithApprovedPlan();
-    await room.service.setAgentScope(room.cursor, { writeTasks: [room.api] });
+    await room.service.setAgentScope(OWNER_ID, room.cursor, { writeTasks: [room.api] });
 
     await refusal(() => room.service.claimTask(room.cursor, { taskId: room.ui }), 'OUT_OF_SCOPE');
     const claimed = await room.service.claimTask(room.cursor, { taskId: room.api });
@@ -211,7 +212,7 @@ describe('the seam', () => {
     });
 
     assert.equal(result.task.status, 'submitted');
-    const accepted = await room.service.acceptTask(room.ui);
+    const accepted = await room.service.acceptTask(OWNER_ID, room.ui);
     assert.equal(accepted.status, 'accepted');
   });
 
@@ -242,7 +243,7 @@ describe('messages and budgets', () => {
   it('charges every message to its task and stops when the budget is gone', async () => {
     const room = await roomWithApprovedPlan();
     await room.service.claimTask(room.claude, { taskId: room.ui });
-    await room.service.setTaskBudget(room.ui, 2);
+    await room.service.setTaskBudget(OWNER_ID, room.ui, 2);
 
     const first = await room.service.postMessage(room.claude, {
       taskId: room.ui,
@@ -279,7 +280,7 @@ describe('messages and budgets', () => {
   it('lets the human raise the budget and the work continue', async () => {
     const room = await roomWithApprovedPlan();
     await room.service.claimTask(room.claude, { taskId: room.ui });
-    await room.service.setTaskBudget(room.ui, 1);
+    await room.service.setTaskBudget(OWNER_ID, room.ui, 1);
     await room.service.postMessage(room.claude, {
       taskId: room.ui,
       to: [room.cursor],
@@ -291,7 +292,7 @@ describe('messages and budgets', () => {
       'BUDGET_EXHAUSTED'
     );
 
-    await room.service.setTaskBudget(room.ui, 5);
+    await room.service.setTaskBudget(OWNER_ID, room.ui, 5);
     const resumed = await room.service.postMessage(room.claude, {
       taskId: room.ui,
       to: [room.cursor],
@@ -355,7 +356,7 @@ describe('messages and budgets', () => {
     assert.ok(room.service.supervisorView().attention.some((item) => item.includes('asked you')));
 
     const before = room.service.snapshot().tasks.find((task) => task.id === room.ui)?.actionsUsed;
-    await room.service.postAsHuman({ taskId: room.ui, threadId: asked.threadId, body: 'Yes, remember it.' });
+    await room.service.postAsHuman(OWNER_ID, { taskId: room.ui, threadId: asked.threadId, body: 'Yes, remember it.' });
     const after = room.service.snapshot().tasks.find((task) => task.id === room.ui)?.actionsUsed;
     assert.equal(before, after);
   });
@@ -364,7 +365,7 @@ describe('messages and budgets', () => {
 describe('visibility', () => {
   it('keeps a thread to the agents in it', async () => {
     const room = await roomWithApprovedPlan();
-    const third = await room.service.addAgent({ id: 'codex', displayName: 'Codex', provider: 'codex', role: 'peer' });
+    const third = await room.service.addAgent(OWNER_ID, { id: 'codex', displayName: 'Codex', provider: 'codex', role: 'peer' });
     await room.service.postMessage(room.claude, {
       taskId: room.ui,
       to: [room.cursor],
@@ -409,7 +410,7 @@ describe('visibility', () => {
       kind: 'ask',
       body: 'Chatter the newcomer does not need.'
     });
-    const late = await room.service.addAgent({ id: 'codex', displayName: 'Codex', provider: 'codex', role: 'peer' });
+    const late = await room.service.addAgent(OWNER_ID, { id: 'codex', displayName: 'Codex', provider: 'codex', role: 'peer' });
 
     const view = await room.service.readRoom(late.agent.id, {});
     assert.equal(view.threads.length, 0);
@@ -421,7 +422,7 @@ describe('visibility', () => {
 describe('human controls', () => {
   it('stops a paused agent doing anything', async () => {
     const room = await roomWithApprovedPlan();
-    await room.service.pauseAgent(room.claude, 'Hold on, I want to look at this.');
+    await room.service.pauseAgent(OWNER_ID, room.claude, 'Hold on, I want to look at this.');
 
     const error = await refusal(() => room.service.claimTask(room.claude, { taskId: room.ui }), 'AGENT_PAUSED');
     assert.match(error.message, /Hold on/);
@@ -435,7 +436,7 @@ describe('human controls', () => {
     assert.equal(view.you.paused, true);
     assert.match(view.guidance.join(' '), /paused/);
 
-    await room.service.resumeAgent(room.claude);
+    await room.service.resumeAgent(OWNER_ID, room.claude);
     const claimed = await room.service.claimTask(room.claude, { taskId: room.ui });
     assert.equal(claimed.task.owner, room.claude);
   });
@@ -467,7 +468,7 @@ describe('human controls', () => {
   it('keeps a room to one lead', async () => {
     const room = await twoAgentRoom();
     await refusal(
-      () => room.service.addAgent({ displayName: 'Codex', provider: 'codex', role: 'lead' }),
+      () => room.service.addAgent(OWNER_ID, { displayName: 'Codex', provider: 'codex', role: 'lead' }),
       'INVALID'
     );
   });

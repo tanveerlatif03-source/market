@@ -11,6 +11,7 @@ import { hasOpenedToRoom, longestWait, queueFor, unanswered } from '../src/room/
 import { REWRITE_THRESHOLD } from '../src/room/spin.ts';
 import { refusal } from './helpers.ts';
 import type { RoomService } from '../src/room/service.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 /**
  * Phase 2's acceptance test.
@@ -86,8 +87,8 @@ async function unattendedRoom(): Promise<Stage> {
     name: 'Login rebuild',
     goal: 'Replace the login flow and the session store behind it.'
   });
-  await service.addAgent({ id: 'claude', displayName: 'Claude', provider: 'claude-code', role: 'lead' });
-  await service.addAgent({ id: 'cursor', displayName: 'Cursor', provider: 'cursor', role: 'peer' });
+  await service.addAgent(OWNER_ID, { id: 'claude', displayName: 'Claude', provider: 'claude-code', role: 'lead' });
+  await service.addAgent(OWNER_ID, { id: 'cursor', displayName: 'Cursor', provider: 'cursor', role: 'peer' });
 
   await service.claimTask('claude', { taskId: 'plan' });
   await service.submitWork('claude', {
@@ -127,19 +128,19 @@ async function unattendedRoom(): Promise<Stage> {
       ]
     }
   });
-  await service.approvePlan('Good split.');
+  await service.approvePlan(OWNER_ID, 'Good split.');
 
   // Two people, one of whom cannot merge. Both go to sleep immediately.
-  await service.addHuman({ id: 'priya', displayName: 'Priya', canMerge: true });
-  await service.addHuman({ id: 'jun', displayName: 'Jun', canMerge: false });
+  await service.addHuman(OWNER_ID, { id: 'priya', displayName: 'Priya', canMerge: true });
+  await service.addHuman(OWNER_ID, { id: 'jun', displayName: 'Jun', canMerge: false });
 
   const room = service.snapshot();
   const login = room.tasks.find((task) => task.title === 'Login page')?.id as string;
   const sessions = room.tasks.find((task) => task.title === 'Session store')?.id as string;
   const seamId = room.decisions.find((decision) => decision.kind === 'seam')?.id as string;
 
-  await service.assignLaneOwner(login, 'priya');
-  await service.assignLaneOwner(sessions, 'priya');
+  await service.assignLaneOwner(OWNER_ID, login, 'priya');
+  await service.assignLaneOwner(OWNER_ID, sessions, 'priya');
   await service.claimTask('claude', { taskId: login });
   await service.claimTask('cursor', { taskId: sessions });
 
@@ -360,7 +361,7 @@ describe('Phase 2 — and then somebody wakes up', () => {
     await answer('ruling', 'side-with-reviewer', 'Cursor is right: expiresIn is seconds.');
 
     // Siding with the reviewer means the lane does the work again.
-    await s.service.reopenTask(s.login, true);
+    await s.service.reopenTask(OWNER_ID, s.login, true);
     await workOn(
       s.repo,
       `agora/${s.login}`,
@@ -442,7 +443,7 @@ describe('Phase 2 — and then somebody wakes up', () => {
     );
 
     // The lane then changes the very code she signed off on.
-    await s.service.reopenTask(s.sessions, true);
+    await s.service.reopenTask(OWNER_ID, s.sessions, true);
     await workOn(
       s.repo,
       `agora/${s.sessions}`,

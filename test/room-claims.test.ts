@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { refusal, roomWithApprovedPlan } from './helpers.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 /**
  * Service-level claim behaviour. The time-dependent transitions — soft lapse,
@@ -93,7 +94,7 @@ describe('claiming a file through the room', () => {
 
   it('will not let a paused agent take a file', async () => {
     const room = await roomWithApprovedPlan();
-    await room.service.pauseAgent(room.claude, 'Hold on.');
+    await room.service.pauseAgent(OWNER_ID, room.claude, 'Hold on.');
     await refusal(
       () => room.service.claimFile(room.claude, { path: 'src/auth/AuthPage.tsx', laneId: room.ui }),
       'AGENT_PAUSED'

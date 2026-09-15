@@ -28,6 +28,7 @@ function instructionsFor(roomName: string, goal: string): string {
     '- If you think a ruling is wrong, use dissent — comply and object at the same time. It stops nothing and costs nothing.',
     '- When a lane across one of your contracts submits, you are asked to read it. Use review_lane. Nothing on either side lands until you do, so it is not optional and not a courtesy.',
     '- Use why_is_this to find out what decided a file, a lane or a contract before you argue with it.',
+    '- If your tool knows what your work has cost — tokens, requests, or how much of your plan is gone — say so with report_usage. Nothing is converted into money and nothing is added up; a quota running low is the one that actually stops the work.',
     '- Send only the ask and the answer. Your reasoning and live status go to the human through status_note on any tool call, never to another agent.',
     '- Threads are visible to their participants and to the human. Decisions are visible to everyone, including agents that join later.',
     '',
@@ -434,6 +435,45 @@ export function createAgentMcpServer(service: RoomService, agentId: string): Age
         }
         return { reviewsDue: service.reviewsDue(agentId) };
       })
+  );
+
+  server.registerTool(
+    'report_usage',
+    {
+      title: 'Say what this cost',
+      description:
+        'Report what your work has used, when your tool actually knows. Token counts, request ' +
+        'counts, or how much of your plan\u2019s quota is gone. Agora never converts these into ' +
+        'money or adds them together, because they are three different kinds of fact — it keeps ' +
+        'each one labelled with where it came from. Reporting a quota that is nearly gone gets a ' +
+        'person involved before it runs out mid-lane rather than after.',
+      inputSchema: {
+        provenance: z
+          .enum(['metered', 'reported', 'quota'])
+          .describe(
+            'reported = your own count. quota = how much of your plan is used. ' +
+              'metered = only when Agora brokered the call itself.'
+          ),
+        amount: z.number().min(0).describe('What you counted.'),
+        unit: z.string().min(1).describe('"tokens", "requests", "usd-cents" — what you counted in.'),
+        limit: z.number().min(0).optional().describe('Required for a quota: the ceiling.'),
+        lane: z.string().optional().describe('The lane this was spent on.'),
+        note: z.string().optional(),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.recordCost(agentId, {
+          provenance: args.provenance,
+          amount: args.amount,
+          unit: args.unit,
+          limit: args.limit,
+          laneId: args.lane,
+          note: args.note
+        })
+      )
   );
 
   server.registerResource(

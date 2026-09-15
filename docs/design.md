@@ -236,21 +236,61 @@ exercised.
 
 ### Phase 3 — a team product
 
-- Several humans, mirrored permissions in anger (Q7, Q16)
-- Editing the risk list from the dashboard (Q13) — the list itself landed in Phase 2
-- Metered cost for API-key agents (Q15)
-- Sortable table across lanes (Q19)
-- Room close and archive; contracts seed the next room (Q24)
-- Day-one flow with zero configuration (Q25)
+- [x] Several humans, and one line enforced everywhere (Q7, Q16)
+- [ ] That line *read from GitHub* rather than set by hand (Q16)
+- [x] Editing the risk list from the dashboard (Q13) — the list itself landed in Phase 2
+- [x] Cost with its provenance attached, and never a total (Q15)
+- [ ] Metered cost proper, which needs Agora to broker the calls (Q15)
+- [x] Sortable table across lanes (Q19)
+- [x] Room close and archive; contracts seed the next room (Q24)
+- [x] Day-one flow with zero configuration (Q25)
 
 **Passes when** a second person picks up a room cold and rules correctly on the first thing that
-needs them.
+needs them. — **passing**, in `test/phase3.test.ts`, against real git.
+
+**The word doing the work is *correctly*.** Anyone can answer a question with three buttons on it,
+so the test builds a question whose obvious answer is wrong. The contract says `expiresIn` is in
+seconds; the login lane treats it as milliseconds; the agent across the contract says — correctly —
+that this breaks it. Siding with the reviewer is the natural call and it is the wrong one: the lane
+built milliseconds because a person in this room ruled that it should, and said at the time that it
+disagreed. The contract and the ruling contradict each other, and only a person can settle that.
+
+Everything the second person needs is already in the room. The Ledger puts the lane at the top and
+says what is in its way. Provenance carries the earlier ruling and, next to it, Q22's dissent —
+which is the thing that makes that ruling legible as a *ruling* rather than as a fact about the
+world. Take either away and the test fails: they were removed one at a time to check. Without them
+the second person sides with the reviewer and makes an agent redo work a person told it to do.
+
+**One line, drawn once (Q16).** Every act that changes what merges now takes an actor and checks
+it: approving a plan, amending a contract, raising a cap, accepting or reopening a lane, setting
+the risk list, closing the room. Everything reversible — pausing, redirecting, answering, naming
+who answers for a lane, taking a question off someone who has gone quiet — is open to everyone in
+the room. A supervisor token carries one person's rights and no more, so nobody can mint their way
+upward. A refused attempt is on the record, and it survives the rollback it caused.
+
+**What "in anger" turned up.** Two escalations were being discarded by the refusals that raised
+them: a lane that stopped on a spent cap, and a person refused an action. Both wrote their event
+inside a mutation that then threw, so the room rolled back and the escalation went with it — a lane
+stopping silently, which is the one thing Phase 2 rules out. Work that has to outlive its own
+refusal now travels on the error and is applied afterwards, against state that still exists.
+
+**Cost, said honestly (Q15).** `CostReport` has no `total` field and cannot grow one without
+somebody deciding to lie. Reported token counts, quota levels and metered spend sit on separate
+lines with separate units, each carrying how much it is worth in words. A quota nearly gone reaches
+a person before it runs out mid-lane, because that is the one that actually stops work.
+
+**What the open boxes mean.** *Permissions mirrored from GitHub*: the line is built and enforced on
+every action; which side of it a person is on is set when they are added rather than read from the
+GitHub API. That is the same unbuilt shell as Phase 1 — credentials and a public endpoint, not more
+design. *Metered cost*: the shape is there and the tool reports through it, but "metered" means
+Agora brokered the call and counted it, and Agora does not broker anyone's calls. It is left
+labelled and empty rather than filled with a plausible number.
 
 ### Phase 4 — scale
 
 - Multi-repo rooms with ordered landing (Q17)
-- Quota metering where tools report it (Q15)
 - Repetitive work, if the need shows up (Q19)
+- Agora brokering calls, which is the only thing that makes "metered" real (Q15)
 
 **Passes when** a front-end and a back-end repo ship one contract together, and the failure case is
 loud rather than half-landed and quiet.

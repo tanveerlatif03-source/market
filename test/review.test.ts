@@ -8,6 +8,7 @@ import {
 } from '../src/room/review.ts';
 import type { LaneSeamContext, Review, RiskSignOff } from '../src/room/review.ts';
 import { refusal, roomWithApprovedPlan } from './helpers.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 /**
  * Cross-review at the seam (Q13).
@@ -211,7 +212,7 @@ describe('signing off a risky surface', () => {
 describe('recording a review in a room', () => {
   async function submitted(): Promise<Awaited<ReturnType<typeof roomWithApprovedPlan>>> {
     const room = await roomWithApprovedPlan();
-    await room.service.setRiskList([]);
+    await room.service.setRiskList(OWNER_ID, []);
     await room.service.claimTask(room.claude, { taskId: room.ui });
     await room.service.claimTask(room.cursor, { taskId: room.api });
     await room.service.submitWork(room.claude, {
@@ -247,7 +248,7 @@ describe('recording a review in a room', () => {
 
   it('refuses an agent that shares no contract with the lane', async () => {
     const room = await submitted();
-    await room.service.addAgent({
+    await room.service.addAgent(OWNER_ID, {
       id: 'codex',
       displayName: 'Codex',
       provider: 'codex',
@@ -273,8 +274,8 @@ describe('recording a review in a room', () => {
 
   it('puts a disagreement about a contract in front of a person', async () => {
     const room = await submitted();
-    await room.service.addHuman({ id: 'priya', displayName: 'Priya', canMerge: true });
-    await room.service.assignLaneOwner(room.ui, 'priya');
+    await room.service.addHuman(OWNER_ID, { id: 'priya', displayName: 'Priya', canMerge: true });
+    await room.service.assignLaneOwner(OWNER_ID, room.ui, 'priya');
 
     await room.service.reviewLane(room.cursor, {
       laneId: room.ui,

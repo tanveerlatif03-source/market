@@ -49,6 +49,12 @@ export interface Provenance {
   openQuestions: string[];
 }
 
+/** Joins a clause onto text that may already end in punctuation. */
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
 function byTime(a: ProvenanceEntry, b: ProvenanceEntry): number {
   return Date.parse(a.at) - Date.parse(b.at);
 }
@@ -139,9 +145,10 @@ function forLane(room: Room, laneId: string): Provenance {
       kind: 'plan',
       by: room.plan.decidedBy ?? 'human',
       what:
-        `The split was ${room.plan.status}` +
-        (room.plan.note !== null ? `: ${room.plan.note}` : '') +
-        `. "${task.title}" owns ${task.paths.join(', ') || 'nothing yet'}.`,
+        sentence(
+          `The split was ${room.plan.status}` +
+            (room.plan.note !== null ? `: ${room.plan.note}` : '')
+        ) + ` "${task.title}" owns ${task.paths.join(', ') || 'nothing yet'}.`,
       because: 'Every lane starts as a line in an approved plan.'
     });
   }

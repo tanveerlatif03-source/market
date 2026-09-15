@@ -4,6 +4,7 @@ import { refusal, roomWithApprovedPlan } from './helpers.ts';
 import { OPENS_TO_ROOM_AFTER_MS } from '../src/room/attention.ts';
 import { REWRITE_THRESHOLD } from '../src/room/spin.ts';
 import type { RoomService } from '../src/room/service.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 /**
  * Phase 2 at the room level: nothing that needs a person is left without one,
@@ -14,11 +15,11 @@ async function staffed(): Promise<
   Awaited<ReturnType<typeof roomWithApprovedPlan>> & { service: RoomService }
 > {
   const room = await roomWithApprovedPlan();
-  await room.service.addHuman({ id: 'priya', displayName: 'Priya', canMerge: true });
-  await room.service.addHuman({ id: 'sam', displayName: 'Sam', canMerge: true });
-  await room.service.addHuman({ id: 'junior', displayName: 'Jun', canMerge: false });
-  await room.service.assignLaneOwner(room.ui, 'priya');
-  await room.service.assignLaneOwner(room.api, 'sam');
+  await room.service.addHuman(OWNER_ID, { id: 'priya', displayName: 'Priya', canMerge: true });
+  await room.service.addHuman(OWNER_ID, { id: 'sam', displayName: 'Sam', canMerge: true });
+  await room.service.addHuman(OWNER_ID, { id: 'junior', displayName: 'Jun', canMerge: false });
+  await room.service.assignLaneOwner(OWNER_ID, room.ui, 'priya');
+  await room.service.assignLaneOwner(OWNER_ID, room.api, 'sam');
   return room;
 }
 
@@ -53,7 +54,7 @@ describe('nothing needs a person without naming one', () => {
   it('raises a spent budget with a way out', async () => {
     const room = await staffed();
     await room.service.claimTask(room.claude, { taskId: room.ui });
-    await room.service.setTaskBudget(room.ui, 1);
+    await room.service.setTaskBudget(OWNER_ID, room.ui, 1);
     await room.service.postMessage(room.claude, {
       taskId: room.ui,
       to: [room.cursor],
@@ -186,7 +187,7 @@ describe('an agent going in circles', () => {
   it('asks a concrete question after enough rewrites', async () => {
     const room = await staffed();
     await room.service.claimTask(room.claude, { taskId: room.ui });
-    await room.service.setTaskBudget(room.ui, 50);
+    await room.service.setTaskBudget(OWNER_ID, room.ui, 50);
 
     for (let i = 0; i < REWRITE_THRESHOLD; i += 1) {
       await room.service.claimFile(room.claude, {
@@ -203,7 +204,7 @@ describe('an agent going in circles', () => {
   it('escalates to a person when the same thing is missing twice', async () => {
     const room = await staffed();
     await room.service.claimTask(room.claude, { taskId: room.ui });
-    await room.service.setTaskBudget(room.ui, 50);
+    await room.service.setTaskBudget(OWNER_ID, room.ui, 50);
     for (let i = 0; i < REWRITE_THRESHOLD; i += 1) {
       await room.service.claimFile(room.claude, { path: 'src/auth/AuthPage.tsx', laneId: room.ui });
     }
@@ -223,7 +224,7 @@ describe('an agent going in circles', () => {
   it('says nothing about a lane that is making progress', async () => {
     const room = await staffed();
     await room.service.claimTask(room.claude, { taskId: room.ui });
-    await room.service.setTaskBudget(room.ui, 50);
+    await room.service.setTaskBudget(OWNER_ID, room.ui, 50);
     for (let i = 0; i < REWRITE_THRESHOLD + 2; i += 1) {
       await room.service.claimFile(room.claude, { path: 'src/auth/AuthPage.tsx', laneId: room.ui });
     }

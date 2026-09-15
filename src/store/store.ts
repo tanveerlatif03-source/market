@@ -21,6 +21,12 @@ function hydrate(data: AgoraData): AgoraData {
   room.dissents ??= [];
   room.reviews ??= [];
   room.signOffs ??= [];
+  room.costs ??= [];
+  room.status ??= 'open';
+  room.closedAt ??= null;
+  room.closedBy ??= null;
+  room.closeNote ??= null;
+  room.seededFrom ??= null;
   room.riskList ??= DEFAULT_RISK_LIST.map((rule) => ({ ...rule, paths: [...rule.paths] }));
   return data;
 }

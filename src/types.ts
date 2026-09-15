@@ -2,6 +2,7 @@ import type { Claim } from './room/claims.ts';
 import type { AttentionItem } from './room/attention.ts';
 import type { StuckProbe } from './room/spin.ts';
 import type { Review, RiskRule, RiskSignOff } from './room/review.ts';
+import type { CostEntry } from './room/cost.ts';
 
 export type { Claim, ClaimState, ClaimHolderActivity } from './room/claims.ts';
 export type { AttentionItem, AttentionKind, AttentionOption, AttentionQueue } from './room/attention.ts';
@@ -15,6 +16,10 @@ export type {
   RiskSignOff
 } from './room/review.ts';
 export type { Provenance, ProvenanceEntry, ProvenanceSubject } from './room/provenance.ts';
+export type { CostEntry, CostProvenance, CostReport } from './room/cost.ts';
+export type { RoomAction, RightsVerdict } from './room/rights.ts';
+export type { LedgerRow, LedgerColumn, LedgerSort } from './room/ledger.ts';
+export type { CloseReadiness, RoomArchive, SeedContract } from './room/close.ts';
 
 /**
  * Agora domain types.
@@ -270,7 +275,11 @@ export type RoomEventType =
   | 'review.requested'
   | 'risk.flagged'
   | 'risk.signed'
-  | 'lane.landed';
+  | 'lane.landed'
+  | 'cost.reported'
+  | 'room.closed'
+  | 'room.seeded'
+  | 'rights.refused';
 
 export interface RoomEvent {
   seq: number;
@@ -285,12 +294,21 @@ export interface RoomEvent {
   audience: string[];
 }
 
+export type RoomStatus = 'open' | 'closed';
+
 export interface Room {
   id: string;
   name: string;
   goal: string;
   createdAt: string;
   updatedAt: string;
+  /** A room is a unit of work that ends (Q17, Q24). */
+  status: RoomStatus;
+  closedAt: string | null;
+  closedBy: string | null;
+  closeNote: string | null;
+  /** The archive whose contracts this room started from, if any (Q24). */
+  seededFrom: string | null;
   /** One agent is lead for the room: it proposes the split, the human approves. */
   lead: string | null;
   plan: Plan;
@@ -314,6 +332,8 @@ export interface Room {
   riskList: RiskRule[];
   /** People having looked at those surfaces, per submission (Q13). */
   signOffs: RiskSignOff[];
+  /** What the work cost, each figure carrying where it came from (Q15). */
+  costs: CostEntry[];
   threads: Thread[];
   events: RoomEvent[];
   eventSeq: number;
@@ -324,6 +344,8 @@ export interface TokenRecord {
   id: string;
   kind: 'agent' | 'supervisor';
   agentId: string | null;
+  /** For a supervisor token: which person it acts as (Q16). */
+  humanId?: string | null;
   label: string;
   /** sha256 of the token. The token itself is shown once, at creation. */
   hash: string;

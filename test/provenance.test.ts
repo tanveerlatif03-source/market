@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { roomWithApprovedPlan } from './helpers.ts';
+import { OWNER_ID } from '../src/room/seed.ts';
 
 /**
  * Provenance (Q26): "why is this the way it is".
@@ -16,9 +17,9 @@ async function history(): Promise<
   Awaited<ReturnType<typeof roomWithApprovedPlan>> & { path: string }
 > {
   const room = await roomWithApprovedPlan();
-  await room.service.setRiskList([]);
-  await room.service.addHuman({ id: 'priya', displayName: 'Priya', canMerge: true });
-  await room.service.assignLaneOwner(room.ui, 'priya');
+  await room.service.setRiskList(OWNER_ID, []);
+  await room.service.addHuman(OWNER_ID, { id: 'priya', displayName: 'Priya', canMerge: true });
+  await room.service.assignLaneOwner(OWNER_ID, room.ui, 'priya');
   await room.service.claimTask(room.claude, { taskId: room.ui });
   await room.service.claimTask(room.cursor, { taskId: room.api });
   await room.service.claimFile(room.claude, { path: 'src/auth/AuthPage.tsx', laneId: room.ui });
@@ -37,7 +38,7 @@ async function history(): Promise<
     laneId: room.ui
   });
 
-  await room.service.amendSeam(room.seamId, {
+  await room.service.amendSeam(OWNER_ID, room.seamId, {
     body: 'Request {email, password}. Response 200 {ok:true, token, expiresIn} or 401 {ok:false, error}.'
   });
 
@@ -155,7 +156,7 @@ describe('why is this lane the way it is', () => {
 
   it('records the ruling once a person has settled it', async () => {
     const room = await history();
-    await room.service.assignLaneOwner(room.api, 'priya');
+    await room.service.assignLaneOwner(OWNER_ID, room.api, 'priya');
     await room.service.submitWork(room.cursor, {
       taskId: room.api,
       summary: 'Needs a decision on rounding.',

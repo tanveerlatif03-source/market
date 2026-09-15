@@ -6,7 +6,7 @@ import { after, describe, it } from 'node:test';
 import { EventBus } from '../src/events.ts';
 import { AgoraStore } from '../src/store/store.ts';
 import { RoomService } from '../src/room/service.ts';
-import { createAgoraData } from '../src/room/seed.ts';
+import { createAgoraData, OWNER_ID } from '../src/room/seed.ts';
 import { AUTH_PAGE_PLAN } from './helpers.ts';
 
 const temporary: string[] = [];
@@ -31,7 +31,7 @@ describe('the room on disk', () => {
       );
 
     const first = await open();
-    const lead = await first.addAgent({
+    const lead = await first.addAgent(OWNER_ID, {
       id: 'claude',
       displayName: 'Claude',
       provider: 'claude-code',
@@ -44,7 +44,7 @@ describe('the room on disk', () => {
       outcome: 'needs-review',
       plan: AUTH_PAGE_PLAN
     });
-    await first.approvePlan();
+    await first.approvePlan(OWNER_ID);
 
     const second = await open();
     const room = second.snapshot();
@@ -61,8 +61,8 @@ describe('the room on disk', () => {
       await AgoraStore.open(file, () => createAgoraData({ name: 'Room', goal: 'Goal.' })),
       new EventBus()
     );
-    const { token } = await service.addAgent({ displayName: 'Claude', provider: 'claude-code', role: 'lead' });
-    const supervisorToken = await service.createSupervisorToken('human');
+    const { token } = await service.addAgent(OWNER_ID, { displayName: 'Claude', provider: 'claude-code', role: 'lead' });
+    const supervisorToken = await service.createSupervisorToken(OWNER_ID, 'human');
 
     const written = await readFile(file, 'utf8');
     assert.ok(!written.includes(token));
