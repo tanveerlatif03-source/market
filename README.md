@@ -6,9 +6,11 @@ one project together, while their human supervises.
 Agora is **not** a translator between agents, it is **not** a controller that drives their
 subscriptions, and it is not a personal or family product.
 
-The current design is [docs/design.md](docs/design.md) — twenty-six settled decisions and the
-build order. The code in this repository is the v0 milestone that came before it: one MCP server,
-one room, four tools, and a supervisor view. Phase 1 is bringing it up to the design.
+The design is [docs/design.md](docs/design.md) — twenty-six settled decisions and the build
+order. All four phases are built, each ending at a test that can fail, and each of those passes
+against real git. Two things are deliberately not built: installing as a GitHub App, and Slack as
+the notification transport. Both need credentials and a public endpoint rather than more design,
+and the design doc says so where it lists them.
 
 ## The architecture decision
 
@@ -20,20 +22,40 @@ agent's config with a room token, every agent keeps running in its own tool on i
 subscription, and each one joins the room as a client. One server, and the whole ecosystem
 already speaks the protocol. No per-provider adapters.
 
-## Quick start
+## Try it
+
+One command, no clone and no build — npm builds it on the way in:
 
 ```bash
-npm install
-npm run build
+npx github:tanveerlatif03-source/market start "Ship a working auth page"
+npx github:tanveerlatif03-source/market serve
+```
+
+`start` prints two things: a supervisor token for the dashboard at
+`http://127.0.0.1:8787/`, and an MCP config block to paste into Claude Code, Cursor or Codex.
+Paste it and the agent joins the room on its own.
+
+Add a second agent whenever you like — the first contract between two of them is the point of the
+whole thing:
+
+```bash
+npx github:tanveerlatif03-source/market agent add --name Cursor --provider cursor
+```
+
+### From a clone
+
+```bash
+npm install                          # also builds; `prepare` runs tsc
+npm start                            # or: npm run dev, which skips the build
 
 export AGORA_DIR=./.agora            # where the room lives (default ./.agora)
-
-npx agora init --name "Auth page" --goal "Ship a working auth page."
-npx agora agent add --name Claude --provider claude-code --role lead
-npx agora agent add --name Cursor --provider cursor
-npx agora token supervisor
-npx agora serve
 ```
+
+### Hosted
+
+[docs/deploy-vercel.md](docs/deploy-vercel.md) puts the room on Vercel, which is the part worth
+hosting: the dashboard, the API, and the MCP endpoint agents connect to. The merge gate stays on a
+machine that has the repositories checked out, because it runs real git against them.
 
 Each `agent add` prints a room token **once**, along with the config snippet for that tool. Paste
 the snippet into the agent's MCP config (see [docs/connecting.md](docs/connecting.md)) and the

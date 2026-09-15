@@ -1,0 +1,3 @@
+Agora serves everything from one function; nothing here is static. Vercel wants
+an output directory to exist, so this one does, and the rewrite in vercel.json
+sends every path to api/index instead.

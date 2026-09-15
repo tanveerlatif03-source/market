@@ -1095,11 +1095,36 @@ select.btn { padding-right: 8px; }
     return api("/api/room").then(render).then(loadLedger).then(loadSweeps);
   }
 
+  // A serverless host cuts a long-lived response off at its function timeout,
+  // so the stream is treated as a bonus rather than a promise: when it is up,
+  // updates are instant; when it is not, the page polls. Either way a person
+  // looking at the dashboard is looking at the room.
+  var POLL_MS = 5000;
+  var polling = null;
+
+  function startPolling() {
+    if (polling) return;
+    polling = setInterval(function () { refresh().catch(function () {}); }, POLL_MS);
+  }
+  function stopPolling() {
+    if (!polling) return;
+    clearInterval(polling);
+    polling = null;
+  }
+
   function connect() {
     if (stream) stream.close();
+    startPolling();
     stream = new EventSource("/api/events?since=0&access_token=" + encodeURIComponent(token));
-    stream.onopen = function () { $("live-dot").className = "dot dot--live"; };
-    stream.onerror = function () { $("live-dot").className = "dot dot--bad"; };
+    stream.onopen = function () {
+      $("live-dot").className = "dot dot--live";
+      stopPolling();
+    };
+    stream.onerror = function () {
+      $("live-dot").className = "dot dot--warn";
+      $("live-dot").title = "Live updates dropped; polling every " + POLL_MS / 1000 + "s.";
+      startPolling();
+    };
     stream.onmessage = function (message) {
       var event = JSON.parse(message.data);
       pushEvent(event);
