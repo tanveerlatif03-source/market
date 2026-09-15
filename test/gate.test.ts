@@ -7,8 +7,8 @@ import type { ReviewRequirement } from '../src/room/review.ts';
 
 const AT = '2026-09-15T12:00:00.000Z';
 
-function claim(path: string, holder: string): Claim {
-  return { path, holder, laneId: 'wizard', claimedAt: AT, touchedAt: AT, touches: 1 };
+function claim(path: string, holder: string, laneId = 'wizard'): Claim {
+  return { path, holder, laneId, claimedAt: AT, touchedAt: AT, touches: 1 };
 }
 
 function seam(overrides: Partial<SeamState> = {}): SeamState {
@@ -38,6 +38,7 @@ function lane(overrides: Partial<LaneUnderGate> = {}): LaneUnderGate {
     seams: [seam()],
     reviews: [review()],
     unsignedRisks: [],
+    unfinishedSweeps: [],
     evidence: { statement: 'The flow completes in under three minutes.', produced: true },
     ...overrides
   };
@@ -85,7 +86,7 @@ describe('territory', () => {
     );
   });
 
-  it('refuses a file another agent is holding', () => {
+  it('refuses a file held for another lane', () => {
     const decision = evaluateMerge(
       gate({
         lane: lane({
@@ -94,7 +95,7 @@ describe('territory', () => {
         }),
         claims: [
           claim('src/checkout/Wizard.tsx', 'claude'),
-          claim('src/pricing/quote.ts', 'cursor')
+          claim('src/pricing/quote.ts', 'cursor', 'pricing')
         ]
       })
     );
@@ -103,7 +104,26 @@ describe('territory', () => {
     const refusal = decision.reasons.find((r) => r.code === 'foreign-files');
     assert.ok(refusal);
     assert.match(refusal.detail, /cursor/);
+    assert.match(refusal.detail, /for "pricing"/);
     assert.match(refusal.detail, /Claim, do not merge/);
+  });
+
+  it('allows a file another agent is holding for this same lane (Q19)', () => {
+    // A grid sweep puts several agents inside one lane on purpose. Territory
+    // belongs to the lane; the holder is whoever is writing this minute.
+    const decision = evaluateMerge(
+      gate({
+        lane: lane({
+          changedFiles: ['src/checkout/Wizard.tsx', 'src/checkout/Step.tsx'],
+          declaredFiles: ['src/checkout/Wizard.tsx', 'src/checkout/Step.tsx']
+        }),
+        claims: [
+          claim('src/checkout/Wizard.tsx', 'claude'),
+          claim('src/checkout/Step.tsx', 'codex')
+        ]
+      })
+    );
+    assert.equal(decision.verdict, 'merge');
   });
 
   it('notes an undeclared file it was entitled to change, without refusing', () => {

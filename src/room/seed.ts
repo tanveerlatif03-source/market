@@ -126,6 +126,7 @@ export function createRoom(options: CreateRoomOptions): Room {
     riskList: DEFAULT_RISK_LIST.map((rule) => ({ ...rule, paths: [...rule.paths] })),
     signOffs: [],
     costs: [],
+    batches: [],
     threads: [],
     events: [
       {

@@ -190,6 +190,7 @@ describe('sorting', () => {
       cost: { laneId: null, lines: [], caveat: '' },
       costSummary: 'not counted',
       questionsOpen: 0,
+      sweep: null,
       blockedOn: '',
       updatedAt: '2026-09-15T12:00:00.000Z',
       ...overrides

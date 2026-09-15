@@ -62,6 +62,12 @@ export async function handleSupervisorRequest(
     return true;
   }
 
+  // Repetitive work as a grid (Q19).
+  if (method === 'GET' && path === '/api/sweeps') {
+    sendJson(res, 200, { sweeps: service.sweeps() });
+    return true;
+  }
+
   // Can this room close, and what is in the way (Q24)?
   if (method === 'GET' && path === '/api/close') {
     const landed = (url.searchParams.get('landed') ?? '')

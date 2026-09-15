@@ -20,6 +20,7 @@ import { evaluateMerge, summarize } from './evaluate.ts';
 import type { GateDecision, LaneUnderGate, SeamState } from './evaluate.ts';
 import { reviewRequirements, risksTouched, seamContextOf, unsignedRisks } from '../room/review.ts';
 import { landingPlan, repoOf } from '../room/repos.ts';
+import { progressOf, unfinishedBatches } from '../room/grid.ts';
 import type { LandingPlan, LandingStep, RoomRepo } from '../room/repos.ts';
 import type { RoomService } from '../room/service.ts';
 import type { Room, SeamCheck, Task } from '../types.ts';
@@ -346,6 +347,10 @@ export class MergeGate {
         declaredFiles: last?.filesChanged ?? [],
         seams: seamStates(room, task, last?.seamChecks ?? []),
         reviews: reviewRequirements(seamContextOf(room, laneId)),
+        unfinishedSweeps: unfinishedBatches(room.batches, laneId).map((batch) => ({
+          title: batch.title,
+          summary: progressOf(batch).summary
+        })),
         // The diff decides which risky surfaces were touched, not the report.
         unsignedRisks: unsignedRisks(
           risksTouched(changed, room.riskList),

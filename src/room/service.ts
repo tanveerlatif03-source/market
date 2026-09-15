@@ -38,6 +38,8 @@ import { archiveOf, closeReadiness } from './close.ts';
 import type { CloseReadiness, RoomArchive } from './close.ts';
 import { contractsMissingOrder, partialLandingSummary, repoOf } from './repos.ts';
 import type { PartialLanding, RoomRepo } from './repos.ts';
+import { allocate, assessSweep, collapseFindings, progressOf } from './grid.ts';
+import type { Batch, BatchProgress, BatchRow, SweepVerdict } from './grid.ts';
 import type {
   Dissent,
   Human,
@@ -163,6 +165,18 @@ export interface SubmitWorkResult {
 }
 
 type EmitFn = (event: Omit<RoomEvent, 'seq' | 'at'>) => void;
+
+/** The sweep's state, said once, with the collapsed findings under it. */
+function detailFor(verdict: SweepVerdict): string {
+  const rows = verdict.findings
+    .map(
+      (finding) =>
+        `  ${finding.subjects.length} row(s): ${finding.finding}` +
+        (finding.subjects.length <= 3 ? ` (${finding.subjects.join(', ')})` : '')
+    )
+    .join('\n');
+  return rows === '' ? verdict.detail : `${verdict.detail}\n${rows}`;
+}
 
 /**
  * Work that belongs to a mutation that failed, and must outlive it. A refusal
@@ -1292,6 +1306,12 @@ export class RoomService {
       this.touchPresence(agent, emit);
       this.requireActive(agent);
 
+      // Territory belongs to the lane, so claiming *for* a lane is a real act.
+      // The owner may do it; so may anyone holding one of that lane's grid rows
+      // (Q19), because a sweep is several agents inside one lane on purpose.
+      // Nobody else, or the gate's territory rule would be a formality.
+      this.requireLaneAccess(room, agentId, input.laneId);
+
       const now = Date.now();
       this.sweepAbandoned(room, now, emit);
 
@@ -1792,6 +1812,26 @@ export class RoomService {
       item.resolution = input.note ? `${option.label} — ${input.note}` : option.label;
       human.lastSeenAt = item.resolvedAt;
 
+      // A sweep's question is answered once and lands on every row that was
+      // stuck on the same thing (Q19). Answering forty times is the failure
+      // this whole shape exists to avoid.
+      const sweep = room.batches.find((batch) => batch.attentionId === item.id);
+      if (sweep !== undefined) {
+        const touched = this.settleSweep(sweep, input.optionId, input.note ?? '');
+        if (touched > 0) {
+          emit({
+            type: 'batch.row.finished',
+            actor: humanId,
+            taskId: sweep.laneId,
+            threadId: null,
+            summary:
+              `${human.displayName} answered "${sweep.title}" once; it settled ${touched} row(s).`,
+            audience: []
+          });
+        }
+        sweep.attentionId = null;
+      }
+
       // Approving a risk item *is* the sign-off, and it covers exactly the
       // submission this person was shown (Q13).
       if (item.signOff !== undefined && input.optionId === 'approve' && item.laneId !== null) {
@@ -2248,6 +2288,377 @@ export class RoomService {
         'a person has to look before it lands.',
       audience: [HUMAN_ID]
     });
+  }
+
+  // ------------------------------------------------------------- the grid (Q19)
+
+  /**
+   * Opens a sweep: one instruction, many subjects, one row each.
+   *
+   * The subjects are given as real paths. Agora expands nothing clever and
+   * evaluates nothing at all — Q19 parked a formula language on purpose, and
+   * the distance between "expand a list of files into rows" and "invent a
+   * language" is the whole of that decision.
+   */
+  async openBatch(
+    agentId: string,
+    input: { laneId: string; title: string; instruction: string; subjects: string[] } & StatusInput
+  ): Promise<{ batch: Batch; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+      const task = this.taskOf(room, input.laneId);
+
+      if (task.owner !== agentId) {
+        throw new AgoraError(
+          'NOT_OWNER',
+          `"${task.id}" is ${task.owner === null ? 'unclaimed' : `owned by ${task.owner}`}.`,
+          'A sweep belongs to a lane, and the lane’s owner answers for it. Claim it first.'
+        );
+      }
+
+      const subjects = [...new Set(input.subjects.map(normalizePath))].filter(
+        (subject) => subject !== ''
+      );
+      if (subjects.length === 0) {
+        throw new AgoraError(
+          'INVALID',
+          'A sweep with no subjects is not a sweep.',
+          'Pass the paths this instruction applies to.'
+        );
+      }
+
+      // Every subject has to be inside the lane, for the same reason a lane's
+      // own work does: a sweep is not a way round the territory rule.
+      const outside = pathsOutsideLane(subjects, task.paths);
+      if (outside.length > 0) {
+        throw new AgoraError(
+          'OUT_OF_SCOPE',
+          `These subjects are outside the lane of "${task.id}": ${outside.join(', ')}.`,
+          'A sweep covers its own lane. Ask the human to widen it, or open a lane that owns those paths.',
+          { outside, lane: task.paths }
+        );
+      }
+
+      const at = nowIso();
+      const batch: Batch = {
+        id: shortId('grid'),
+        laneId: task.id,
+        title: input.title,
+        instruction: input.instruction,
+        fromPaths: subjects,
+        rows: subjects.map((subject) => ({
+          id: shortId('row'),
+          subject,
+          state: 'pending' as const,
+          agent: null,
+          finding: '',
+          takenAt: null,
+          finishedAt: null
+        })),
+        openedBy: agentId,
+        openedAt: at,
+        attentionId: null
+      };
+      room.batches.push(batch);
+      this.spendAction(room, task, emit);
+
+      emit({
+        type: 'batch.opened',
+        actor: agentId,
+        taskId: task.id,
+        threadId: null,
+        summary:
+          `${agent.displayName} opened "${input.title}": ${batch.rows.length} rows on "${task.id}". ` +
+          'Any agent can take rows.',
+        audience: unique(room.agents.map((other) => other.id).filter((id) => id !== agentId))
+      });
+
+      return {
+        batch,
+        message:
+          `${batch.rows.length} rows. Other agents can take some with take_rows — that is the ` +
+          'point of a sweep. Nobody has to ask anybody.'
+      };
+    });
+  }
+
+  /**
+   * Hands rows to whoever asks. No negotiation, which is Q5's rule at a
+   * different grain: an agent asks Agora for work and gets some.
+   */
+  async takeRows(
+    agentId: string,
+    input: { batchId: string; count?: number } & StatusInput
+  ): Promise<{ rows: BatchRow[]; instruction: string; remaining: number; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+
+      const batch = room.batches.find((candidate) => candidate.id === input.batchId);
+      if (batch === undefined) {
+        throw new AgoraError('NOT_FOUND', `No sweep "${input.batchId}".`, 'Use an id from read_room.');
+      }
+      const lane = this.taskOf(room, batch.laneId);
+      if (lane.budgetHaltedAt !== null) {
+        throw new AgoraError(
+          'BUDGET_EXHAUSTED',
+          `"${lane.id}" has stopped, so its sweep has too.`,
+          'Wait. A person has been asked to raise the cap or redirect it.'
+        );
+      }
+
+      const rows = allocate(batch, agentId, input.count ?? 1, nowIso());
+      if (rows.length === 0) {
+        return {
+          rows,
+          instruction: batch.instruction,
+          remaining: 0,
+          message: 'Nothing left to take. Every row is in hand or answered for.'
+        };
+      }
+
+      this.spendAction(room, lane, emit);
+      this.touchStatus(agent, emit, {
+        note: input.statusNote,
+        state: 'working',
+        taskId: lane.id
+      });
+
+      emit({
+        type: 'batch.rows.taken',
+        actor: agentId,
+        taskId: lane.id,
+        threadId: null,
+        summary: `${agent.displayName} took ${rows.length} row(s) of "${batch.title}".`,
+        audience: []
+      });
+
+      const remaining = progressOf(batch).pending;
+      return {
+        rows,
+        instruction: batch.instruction,
+        remaining,
+        message:
+          `${rows.length} row(s) are yours. Claim each file before you write to it, then answer ` +
+          `for it with finish_row. ${remaining} still unclaimed.`
+      };
+    });
+  }
+
+  /** One row, answered for. Changed, deliberately left alone, or stuck. */
+  async finishRow(
+    agentId: string,
+    input: { rowId: string; outcome: 'done' | 'skipped' | 'stuck'; finding: string } & StatusInput
+  ): Promise<{ row: BatchRow; progress: BatchProgress; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+
+      const batch = room.batches.find((candidate) =>
+        candidate.rows.some((row) => row.id === input.rowId)
+      );
+      const row = batch?.rows.find((candidate) => candidate.id === input.rowId);
+      if (batch === undefined || row === undefined) {
+        throw new AgoraError('NOT_FOUND', `No row "${input.rowId}".`, 'Take rows before answering for them.');
+      }
+      if (row.agent !== agentId) {
+        throw new AgoraError(
+          'NOT_OWNER',
+          `That row is ${row.agent === null ? 'not taken' : `${row.agent}'s`}.`,
+          'Answer for the rows you took.'
+        );
+      }
+      if (input.finding.trim() === '') {
+        throw new AgoraError(
+          'INVALID',
+          'A row needs a finding, even when nothing changed.',
+          'Say what you did, or why there was nothing to do. "Nothing" on forty rows is itself ' +
+            'the answer to something.'
+        );
+      }
+
+      row.state = input.outcome;
+      row.finding = input.finding;
+      row.finishedAt = nowIso();
+
+      emit({
+        type: 'batch.row.finished',
+        actor: agentId,
+        taskId: batch.laneId,
+        threadId: null,
+        summary: `${agent.displayName}: ${row.subject} — ${input.outcome}. ${input.finding}`,
+        audience: []
+      });
+
+      const progress = progressOf(batch);
+      this.reviewSweep(room, batch, emit);
+
+      return {
+        row,
+        progress,
+        message: progress.finished
+          ? `That was the last one. ${progress.summary}.`
+          : `Recorded. ${progress.summary}.`
+      };
+    });
+  }
+
+  /**
+   * Asks a person about a sweep — once, about the whole thing (Q19, Q8).
+   *
+   * Forty rows raising forty questions is a queue nobody reads. Identical
+   * findings collapse into one, and the item is replaced rather than duplicated
+   * as the sweep goes on, so a person opens one thing and sees where it stands.
+   */
+  private reviewSweep(room: Room, batch: Batch, emit: EmitFn): void {
+    const verdict = assessSweep(batch);
+    const open = room.attention.find(
+      (item) => item.id === batch.attentionId && item.resolvedAt === null
+    );
+
+    if (verdict.kind === 'working') return;
+
+    if (verdict.kind === 'finished') {
+      // Nothing to ask. Close anything still standing and say it landed.
+      if (open !== undefined) {
+        open.resolvedAt = nowIso();
+        open.resolvedBy = HUMAN_ID;
+        open.resolution = 'The sweep finished on its own.';
+      }
+      batch.attentionId = null;
+      emit({
+        type: 'batch.finished',
+        actor: batch.openedBy,
+        taskId: batch.laneId,
+        threadId: null,
+        summary: verdict.detail,
+        audience: []
+      });
+      return;
+    }
+
+    const title =
+      verdict.kind === 'changed-nothing'
+        ? `"${batch.title}" changed nothing, across every row`
+        : `"${batch.title}" is stuck on ${batch.rows.filter((row) => row.state === 'stuck').length} row(s)`;
+
+    // One item for the sweep, refreshed rather than duplicated. The title moves
+    // with it: a queue saying "stuck on 1 row" while nine are stuck is worse
+    // than saying nothing.
+    if (open !== undefined) {
+      open.title = title;
+      open.detail = detailFor(verdict);
+      return;
+    }
+
+    const item = this.raise(room, emit, {
+      kind: verdict.kind === 'changed-nothing' ? 'question' : 'stuck',
+      laneId: batch.laneId,
+      title,
+      detail: detailFor(verdict),
+      needsMergeRights: false,
+      options:
+        verdict.kind === 'changed-nothing'
+          ? [
+              { id: 'accept', label: 'That is right — nothing to do', effect: 'The sweep is finished as it stands.' },
+              { id: 'reword', label: 'The instruction was wrong', effect: 'You reword it and the rows go back to pending.' },
+              { id: 'drop', label: 'Drop the sweep', effect: 'It is abandoned and the lane carries on without it.' }
+            ]
+          : [
+              { id: 'answer', label: 'Answer it once', effect: 'Your answer goes to every row stuck on the same thing.' },
+              { id: 'skip-them', label: 'Leave those rows alone', effect: 'They are marked skipped with your reason and the sweep finishes.' },
+              { id: 'drop', label: 'Drop the sweep', effect: 'It is abandoned and the lane carries on without it.' }
+            ]
+    });
+    batch.attentionId = item.id;
+  }
+
+  /**
+   * Carries one answer onto every row it covers.
+   *
+   * The whole argument for the grid is that a person is asked once. That is
+   * only true if answering once actually finishes the rows, so this is where
+   * the claim is made good.
+   */
+  private settleSweep(batch: Batch, optionId: string, note: string): number {
+    const at = nowIso();
+    let touched = 0;
+
+    if (optionId === 'reword') {
+      // The instruction was wrong, so the rows were never really answered.
+      for (const row of batch.rows) {
+        row.state = 'pending';
+        row.agent = null;
+        row.finding = '';
+        row.takenAt = null;
+        row.finishedAt = null;
+        touched += 1;
+      }
+      if (note.trim() !== '') batch.instruction = note;
+      return touched;
+    }
+
+    if (optionId === 'drop' || optionId === 'accept' || optionId === 'skip-them') {
+      for (const row of batch.rows) {
+        if (row.state === 'done') continue;
+        if (optionId === 'accept' && row.state === 'skipped') continue;
+        row.state = 'skipped';
+        row.finding =
+          row.finding === '' || optionId !== 'accept'
+            ? `Settled by a person: ${note || optionId}`
+            : row.finding;
+        row.finishedAt = at;
+        touched += 1;
+      }
+      return touched;
+    }
+
+    if (optionId === 'answer') {
+      // Every row stuck on the same thing gets the same answer, and goes back
+      // to be redone with it.
+      const worst = collapseFindings(batch, ['stuck'])[0];
+      for (const row of batch.rows) {
+        if (row.state !== 'stuck') continue;
+        const sameProblem =
+          worst === undefined || worst.subjects.includes(row.subject);
+        if (!sameProblem) continue;
+        row.state = 'pending';
+        row.agent = null;
+        row.finding = `A person answered this: ${note}`;
+        row.takenAt = null;
+        row.finishedAt = null;
+        touched += 1;
+      }
+      return touched;
+    }
+
+    return 0;
+  }
+
+  /** What is going on with a lane's sweeps. */
+  batchesFor(laneId: string): { batch: Batch; progress: BatchProgress; verdict: SweepVerdict }[] {
+    return this.store.read((data) =>
+      data.room.batches
+        .filter((batch) => batch.laneId === laneId)
+        .map((batch) => ({ batch, progress: progressOf(batch), verdict: assessSweep(batch) }))
+    );
+  }
+
+  /** Every sweep in the room, for a person walking in. */
+  sweeps(): { batch: Batch; progress: BatchProgress; verdict: SweepVerdict }[] {
+    return this.store.read((data) =>
+      data.room.batches.map((batch) => ({
+        batch,
+        progress: progressOf(batch),
+        verdict: assessSweep(batch)
+      }))
+    );
   }
 
   // ------------------------------------------------------ repositories (Q17)
@@ -2777,6 +3188,36 @@ export class RoomService {
   /** Who is in the room, and what each of them may do. */
   humans(): Human[] {
     return this.store.read((data) => data.room.humans);
+  }
+
+  /**
+   * May this agent claim ground *for* this lane?
+   *
+   * Territory belongs to the lane, so the only thing that has to be refused is
+   * taking ground in a lane somebody else owns — otherwise the gate's territory
+   * rule would be a formality anyone could step around by naming another lane.
+   * An unclaimed lane is nobody's to be trespassed on, and it cannot be
+   * submitted or landed by anyone either way.
+   *
+   * The exception is the grid (Q19): a sweep is several agents inside one lane
+   * on purpose, so holding one of its rows is holding a right to its ground.
+   */
+  private requireLaneAccess(room: Room, agentId: string, laneId: string): void {
+    const task = room.tasks.find((candidate) => candidate.id === laneId);
+    if (task === undefined || task.owner === null || task.owner === agentId) return;
+    const onARow = room.batches.some(
+      (batch) =>
+        batch.laneId === laneId &&
+        batch.rows.some((row) => row.state === 'taken' && row.agent === agentId)
+    );
+    if (onARow) return;
+    throw new AgoraError(
+      'NOT_OWNER',
+      `"${laneId}" is owned by ${task.owner}, not you.`,
+      'Claim your own lane, or take a row of its grid if it has one. Ask in the thread rather ' +
+        'than writing into someone else’s lane.',
+      { owner: task.owner }
+    );
   }
 
   private agentOf(data: AgoraData, agentId: string): Agent {

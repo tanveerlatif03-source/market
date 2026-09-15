@@ -132,6 +132,7 @@ model it repo-agnostic from day one.
 **Q19 — The Ledger is a table; formulas are parked.** A formula language for delegating work
 invents a small language, forever, to do what a button already does. Parked, not killed:
 repetitive work — the same check across forty files, one row each — is genuinely grid-shaped.
+*Built in Phase 4:* the grid, without the language. Agora never reads the instruction it carries.
 
 **Q21 — A joining agent gets the decisions, never the history.** On arrival: the goal, the plan,
 every contract at its current version, its own lane and evidence and budget, and what it may
@@ -289,7 +290,7 @@ broker, so an agent on an API key produces figures Agora counted itself.
 
 - [x] Multi-repo rooms with ordered landing (Q17)
 - [x] Agora brokering calls, which is the only thing that makes "metered" real (Q15)
-- [ ] Repetitive work — deliberately still parked (Q19)
+- [x] Repetitive work as a grid (Q19) — the shape, not the formula language
 
 **Passes when** a front-end and a back-end repo ship one contract together, and the failure case is
 loud rather than half-landed and quiet. — **passing**, in `test/phase4.test.ts`, against two real
@@ -336,11 +337,37 @@ It is narrow on purpose. An agent on a subscription should not use it: that agen
 billing relationship, and routing it through here would bill the work twice — which is the founding
 reason Agora is a place agents connect *to* rather than something that drives them.
 
-**Why the last box is still open.** Q19 parked the grid with a condition attached: *if the need
-shows up*. Four phases in, it has not. Nothing built since has wanted to express itself as forty
-rows of the same check, and the Ledger — which is what Q19 actually asked for — has carried every
-view a person has needed. Building it now would be building against a guess rather than a need, so
-it stays parked, with the condition intact.
+**The grid (Q19).** Q19 parked a *formula language* and said why: inventing a small language,
+forever, to do what a button already does. It did not park the shape that prompted the question —
+*the same check across forty files, one row each* — which it called genuinely grid-shaped. That is
+what is built, and the distance between the two is the whole decision.
+
+Nothing in it evaluates anything. A sweep has an instruction in prose, which Agora stores and hands
+on untouched; a list of real paths; and one row per path. No expressions, no references from one row
+to another, no dependency graph between cells. Agora hands rows out, collects what came back, and
+adds up. That is a button.
+
+Two properties make the shape worth having, and both are enforced rather than hoped for:
+
+*Rows are handed out, never negotiated.* Three agents sweep forty files at once because Agora
+allocates — nobody asks anybody for a turn. This is Q5's rule at a different grain. It needed one
+change underneath: territory now belongs to the **lane** rather than to one agent, because a sweep
+puts several agents inside one lane on purpose. The gate's foreign-file check compares lanes, and
+the room refuses a claim for a lane you neither own nor hold a row of, so the rule did not get
+looser — it got stated correctly.
+
+*Forty findings are not forty questions.* Identical findings collapse, and a sweep raises **one**
+item for the whole batch, refreshed rather than duplicated as more rows land on the same wall.
+Answering it once carries onto every row it covers. This is Q8's rule — a question posted to a room
+of six is a question nobody answers — applied to a queue of forty, where it matters more.
+
+One thing fell out that was not asked for and is worth keeping: a sweep where every row comes back
+with nothing to do says so. Forty files finding nothing is usually an instruction that did not ask
+for what you meant, rather than a codebase that was already right.
+
+**Passes when** forty files, one check and three agents produce one question rather than forty —
+in `test/room-grid.test.ts`. Breaking the collapse, handing a row out twice, dropping the carry-onto-
+every-row, or letting the gate land a half-swept lane each fails it.
 
 ## The bet, stated plainly
 

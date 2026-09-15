@@ -29,6 +29,7 @@ Usage:
   agora serve [--host <host>] [--port <port>] Run the room.
   agora status                                Print the board.
   agora ledger [--sort <column>] [--desc]     Every lane on one screen, worst first.
+  agora sweeps [<lane|id>] [--rows]           Repetitive work: one instruction, many files.
   agora why --file|--lane|--contract <x>      Why is this the way it is.
   agora repo add --id <id> --root <path>      Add a repository to the room.
   agora land <lane> [--dry-run]               Land a lane and everything it shares a contract with.
@@ -440,6 +441,53 @@ async function cmdLand(argv: string[]): Promise<void> {
   if (outcome.verdict !== 'merge') process.exitCode = 1;
 }
 
+/** Repetitive work, as a grid (Q19). */
+async function cmdSweeps(argv: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: { rows: { type: 'boolean' } },
+    allowPositionals: true
+  });
+  const service = await openService();
+  const wanted = positionals[0];
+  const sweeps = service
+    .sweeps()
+    .filter((entry) => wanted === undefined || entry.batch.id === wanted || entry.batch.laneId === wanted);
+
+  if (sweeps.length === 0) {
+    console.log(
+      wanted === undefined
+        ? 'No sweeps. An agent opens one when the same change applies to many files.'
+        : `No sweep matching "${wanted}".`
+    );
+    return;
+  }
+
+  for (const { batch, progress, verdict } of sweeps) {
+    console.log(`${batch.title}  (${batch.id}, lane ${batch.laneId})`);
+    console.log(`  ${batch.instruction}`);
+    console.log(`  ${progress.summary}`);
+    if (verdict.kind !== 'working' && verdict.kind !== 'finished') {
+      console.log(`  ${verdict.detail}`);
+    }
+    // The collapsed view is the point: one line per distinct answer, not one
+    // per row, unless you ask.
+    for (const finding of verdict.findings) {
+      console.log(`    ${String(finding.subjects.length).padStart(3)} × [${finding.state}] ${finding.finding}`);
+    }
+    if (values.rows === true) {
+      console.log('');
+      for (const row of batch.rows) {
+        console.log(
+          `    ${row.state.padEnd(8)} ${(row.agent ?? '—').padEnd(8)} ${row.subject}` +
+            (row.finding === '' ? '' : `\n             ${row.finding}`)
+        );
+      }
+    }
+    console.log('');
+  }
+}
+
 /** A room is a unit of work that ends (Q24). */
 async function cmdClose(argv: string[]): Promise<void> {
   const { values } = parseArgs({
@@ -580,6 +628,10 @@ async function main(): Promise<void> {
       return;
     case 'land':
       await cmdLand([subcommand, ...rest].filter((value): value is string => value !== undefined));
+      return;
+    case 'sweep':
+    case 'sweeps':
+      await cmdSweeps([subcommand, ...rest].filter((value): value is string => value !== undefined));
       return;
     case 'ledger':
       await cmdLedger([subcommand, ...rest].filter((value): value is string => value !== undefined));

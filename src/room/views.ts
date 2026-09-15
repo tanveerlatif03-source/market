@@ -45,6 +45,8 @@ export interface AgentRoomView {
     /** Lanes across your contracts that are waiting on you to read them (Q13). */
     reviewsDue: { laneId: string; seamId: string; seamTitle: string; why: string }[];
   };
+  /** Sweeps with rows left. Any agent may take from these (Q19). */
+  sweeps: { id: string; laneId: string; title: string; instruction: string; pending: number }[];
   agents: AgentRosterEntry[];
   decisions: Decision[];
   tasks: Task[];
@@ -142,6 +144,16 @@ function buildGuidance(
     }
   }
 
+  // A sweep with rows left is work anyone can pick up without asking (Q19).
+  for (const batch of room.batches) {
+    const pending = batch.rows.filter((row) => row.state === 'pending').length;
+    if (pending === 0) continue;
+    guidance.push(
+      `"${batch.title}" has ${pending} row(s) nobody has taken. take_rows and work them — ` +
+        'you do not need anyone’s permission, and you are not treading on whoever else is on it.'
+    );
+  }
+
   // Put this above your own lanes: someone else is stopped until you do it.
   for (const due of owed) {
     guidance.push(
@@ -215,6 +227,15 @@ export function agentRoomView(
       claimableTasks: claimable.map((task) => task.id),
       reviewsDue: owed
     },
+    sweeps: room.batches
+      .map((batch) => ({
+        id: batch.id,
+        laneId: batch.laneId,
+        title: batch.title,
+        instruction: batch.instruction,
+        pending: batch.rows.filter((row) => row.state === 'pending').length
+      }))
+      .filter((batch) => batch.pending > 0),
     agents: room.agents.map(rosterEntry),
     decisions: room.decisions,
     tasks: room.tasks,

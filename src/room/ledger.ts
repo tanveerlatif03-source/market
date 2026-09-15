@@ -13,6 +13,7 @@
 import { claimStateAt } from './claims.ts';
 import type { ClaimHolderActivity } from './claims.ts';
 import { costReport, summarizeCost } from './cost.ts';
+import { progressOf } from './grid.ts';
 import type { CostReport } from './cost.ts';
 import { reviewRequirements, risksTouched, seamContextOf, unsignedRisks } from './review.ts';
 import type { ReviewState } from './review.ts';
@@ -57,6 +58,8 @@ export interface LedgerRow {
   costSummary: string;
   /** Open attention items about this lane. */
   questionsOpen: number;
+  /** Where this lane's sweeps stand, if it has any (Q19). */
+  sweep: { title: string; summary: string; finished: boolean } | null;
   /** The one thing standing between this lane and landing, in a person's words. */
   blockedOn: string;
   updatedAt: string;
@@ -147,6 +150,18 @@ export function ledgerRows(room: Room, now: number = Date.now()): LedgerRow[] {
             ? ('shown' as const)
             : ('promised' as const);
 
+      const sweeps = room.batches.filter((batch) => batch.laneId === task.id);
+      const worstSweep =
+        sweeps.find((batch) => !progressOf(batch).finished) ?? sweeps.at(-1);
+      const sweep =
+        worstSweep === undefined
+          ? null
+          : {
+              title: worstSweep.title,
+              summary: progressOf(worstSweep).summary,
+              finished: progressOf(worstSweep).finished
+            };
+
       const cost = costReport(room.costs, task.id);
       const blockedOn = whatIsBlocking(task.status, {
         questions: questions.length,
@@ -155,7 +170,8 @@ export function ledgerRows(room: Room, now: number = Date.now()): LedgerRow[] {
         evidence,
         review,
         risksOpen,
-        owner: task.owner
+        owner: task.owner,
+        sweepUnfinished: sweep !== null && !sweep.finished
       });
 
       return {
@@ -170,7 +186,8 @@ export function ledgerRows(room: Room, now: number = Date.now()): LedgerRow[] {
           evidence,
           review,
           risksOpen,
-          owner: task.owner
+          owner: task.owner,
+          sweepUnfinished: sweep !== null && !sweep.finished
         }),
         filesHeld: claims.length,
         filesSoft: soft.length,
@@ -182,6 +199,7 @@ export function ledgerRows(room: Room, now: number = Date.now()): LedgerRow[] {
         cost,
         costSummary: summarizeCost(cost),
         questionsOpen: questions.length,
+        sweep,
         blockedOn,
         updatedAt: task.updatedAt
       };
@@ -195,6 +213,7 @@ interface LaneFacts {
   review: ReviewState | 'not-applicable';
   risksOpen: number;
   owner: string | null;
+  sweepUnfinished: boolean;
 }
 
 function healthOf(status: string, facts: LaneFacts): LaneHealth {
@@ -226,6 +245,7 @@ function whatIsBlocking(status: string, facts: LaneFacts & { blockedReason: stri
     return `${facts.risksOpen} risky surface(s) nobody has looked at.`;
   }
   if (facts.owner === null) return 'Nobody has claimed it.';
+  if (facts.sweepUnfinished) return 'Its sweep still has rows nobody has answered for.';
   if (status !== 'submitted' && status !== 'accepted') return 'Being worked on.';
   if (facts.review === 'missing') return 'Waiting on the agent across the contract to read it.';
   if (facts.review === 'stale') return 'Read, but the code or the contract moved since.';

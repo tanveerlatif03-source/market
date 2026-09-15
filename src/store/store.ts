@@ -22,6 +22,7 @@ function hydrate(data: AgoraData): AgoraData {
   room.reviews ??= [];
   room.signOffs ??= [];
   room.costs ??= [];
+  room.batches ??= [];
   room.status ??= 'open';
   room.closedAt ??= null;
   room.closedBy ??= null;

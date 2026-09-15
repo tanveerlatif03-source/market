@@ -200,6 +200,28 @@ select.btn { padding-right: 8px; }
 .red__what { margin-top: 10px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
 .red__actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 
+/* ------------------------------------------------------------------- grid */
+/* Q19: repetitive work is genuinely grid-shaped. One cell per row, so forty
+   files read as one thing rather than forty. */
+.sweep + .sweep { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
+.sweep__head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sweep__title { font-weight: 600; font-size: 14px; }
+.sweep__what { color: var(--ink-3); font-size: 12.5px; margin-top: 3px; }
+.sweep__cells { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 12px; }
+.cell {
+  width: 15px; height: 15px; border-radius: 3px; flex: none;
+  background: var(--surface-2); border: 1px solid var(--line);
+}
+.cell--done { background: var(--good); border-color: var(--good); }
+.cell--skipped { background: color-mix(in oklab, var(--ink-3) 40%, transparent); border-color: transparent; }
+.cell--stuck { background: var(--bad); border-color: var(--bad); }
+.cell--taken { background: color-mix(in oklab, var(--accent) 55%, transparent); border-color: var(--accent); }
+.sweep__key { display: flex; gap: 14px; margin-top: 10px; flex-wrap: wrap; color: var(--ink-3); font-size: 11.5px; }
+.sweep__keyitem { display: flex; align-items: center; gap: 5px; }
+.sweep__findings { margin-top: 12px; }
+.sweep__finding { display: flex; gap: 10px; padding: 5px 0; font-size: 12.5px; align-items: baseline; }
+.sweep__count { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); flex: none; min-width: 42px; }
+
 /* ----------------------------------------------------------------- ledger */
 .ledger { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ledger th, .ledger td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -464,6 +486,14 @@ select.btn { padding-right: 8px; }
       </div>
     </section>
 
+    <section id="sweeps-card" class="card hide">
+      <div class="card__head">
+        <h2 class="card__title">Sweeps</h2>
+        <span id="sweep-count" class="chip card__count"></span>
+      </div>
+      <div class="card__body"><div id="sweeps"></div></div>
+    </section>
+
     <div class="columns">
       <div>
         <section class="card">
@@ -670,6 +700,64 @@ select.btn { padding-right: 8px; }
         $("risk-paths").value = "";
       });
     };
+  }
+
+  // ------------------------------------------------------------------- grid
+  // Q19 parked a formula language, not the shape. Forty rows read as one
+  // picture; the findings underneath are collapsed, so a person reads the
+  // distinct answers rather than forty repetitions of one.
+  function sweepCard(entry) {
+    var batch = entry.batch;
+    var progress = entry.progress;
+    var verdict = entry.verdict;
+
+    var cells = h("div", { class: "sweep__cells" });
+    batch.rows.forEach(function (row) {
+      cells.appendChild(h("span", {
+        class: "cell cell--" + row.state,
+        title: row.subject + " — " + row.state + (row.finding ? ": " + row.finding : "")
+      }));
+    });
+
+    var key = h("div", { class: "sweep__key" });
+    [["done", "changed"], ["skipped", "left alone"], ["stuck", "stuck"], ["taken", "in hand"], ["pending", "not taken"]]
+      .forEach(function (pair) {
+        var count = progress[pair[0]];
+        if (!count) return;
+        key.appendChild(h("span", { class: "sweep__keyitem" },
+          h("span", { class: "cell cell--" + pair[0], style: "width:10px;height:10px" }),
+          h("span", { text: count + " " + pair[1] })));
+      });
+
+    var findings = h("div", { class: "sweep__findings" });
+    (verdict.findings || []).forEach(function (finding) {
+      findings.appendChild(h("div", { class: "sweep__finding" },
+        h("span", { class: "sweep__count", text: finding.subjects.length + " ×" }),
+        h("span", { text: finding.finding })));
+    });
+
+    return h("div", { class: "sweep" },
+      h("div", { class: "sweep__head" },
+        h("span", { class: "sweep__title", text: batch.title }),
+        h("span", { class: "chip" + (verdict.kind === "finished" ? " chip--good" : verdict.kind === "working" ? "" : " chip--warn"), text: progress.summary })),
+      h("div", { class: "sweep__what", text: batch.instruction }),
+      cells,
+      key,
+      verdict.kind === "working" || verdict.kind === "finished"
+        ? null
+        : h("div", { class: "sweep__what", style: "margin-top:12px", text: verdict.detail }),
+      findings
+    );
+  }
+
+  function loadSweeps() {
+    return api("/api/sweeps").then(function (payload) {
+      var sweeps = payload.sweeps || [];
+      $("sweeps-card").classList.toggle("hide", sweeps.length === 0);
+      if (sweeps.length === 0) return;
+      $("sweep-count").textContent = plural(sweeps.length, "sweep");
+      fill("sweeps", sweeps.map(sweepCard), "");
+    }).catch(function () {});
   }
 
   // ----------------------------------------------------------------- ledger
@@ -1004,7 +1092,7 @@ select.btn { padding-right: 8px; }
   }
 
   function refresh() {
-    return api("/api/room").then(render).then(loadLedger);
+    return api("/api/room").then(render).then(loadLedger).then(loadSweeps);
   }
 
   function connect() {

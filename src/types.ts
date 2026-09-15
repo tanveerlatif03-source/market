@@ -4,6 +4,7 @@ import type { StuckProbe } from './room/spin.ts';
 import type { Review, RiskRule, RiskSignOff } from './room/review.ts';
 import type { CostEntry } from './room/cost.ts';
 import type { RoomRepo, PartialLanding } from './room/repos.ts';
+import type { Batch } from './room/grid.ts';
 
 export type { Claim, ClaimState, ClaimHolderActivity } from './room/claims.ts';
 export type { AttentionItem, AttentionKind, AttentionOption, AttentionQueue } from './room/attention.ts';
@@ -27,6 +28,14 @@ export type {
   LandingStep,
   LandingPlan
 } from './room/repos.ts';
+export type {
+  Batch,
+  BatchRow,
+  BatchProgress,
+  RowState,
+  Finding,
+  SweepVerdict
+} from './room/grid.ts';
 
 /**
  * Agora domain types.
@@ -294,6 +303,10 @@ export type RoomEventType =
   | 'lane.landed'
   | 'cost.reported'
   | 'cost.metered'
+  | 'batch.opened'
+  | 'batch.rows.taken'
+  | 'batch.row.finished'
+  | 'batch.finished'
   | 'repo.added'
   | 'landing.started'
   | 'landing.partial'
@@ -365,6 +378,8 @@ export interface Room {
   signOffs: RiskSignOff[];
   /** What the work cost, each figure carrying where it came from (Q15). */
   costs: CostEntry[];
+  /** Repetitive work: one instruction, many subjects, one row each (Q19). */
+  batches: Batch[];
   threads: Thread[];
   events: RoomEvent[];
   eventSeq: number;

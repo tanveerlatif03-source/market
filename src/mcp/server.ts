@@ -28,6 +28,7 @@ function instructionsFor(roomName: string, goal: string): string {
     '- If you think a ruling is wrong, use dissent — comply and object at the same time. It stops nothing and costs nothing.',
     '- When a lane across one of your contracts submits, you are asked to read it. Use review_lane. Nothing on either side lands until you do, so it is not optional and not a courtesy.',
     '- Use why_is_this to find out what decided a file, a lane or a contract before you argue with it.',
+    '- Repetitive work — the same check across many files — is a sweep, not forty messages. open_sweep once, then anyone can take_rows and work them in parallel. A row always gets a finding, even when the answer is "nothing to do".',
     '- If your tool knows what your work has cost — tokens, requests, or how much of your plan is gone — say so with report_usage. Nothing is converted into money and nothing is added up; a quota running low is the one that actually stops the work.',
     '- Send only the ask and the answer. Your reasoning and live status go to the human through status_note on any tool call, never to another agent.',
     '- Threads are visible to their participants and to the human. Decisions are visible to everyone, including agents that join later.',
@@ -472,6 +473,97 @@ export function createAgentMcpServer(service: RoomService, agentId: string): Age
           limit: args.limit,
           laneId: args.lane,
           note: args.note
+        })
+      )
+  );
+
+  server.registerTool(
+    'open_sweep',
+    {
+      title: 'Open a sweep: one instruction, many files',
+      description:
+        'For repetitive work — the same check across forty files. You give the instruction once ' +
+        'and the paths it applies to; Agora makes one row per file. Other agents can then take ' +
+        'rows and work them at the same time as you, without anyone asking anyone for a turn. ' +
+        'Agora never reads or interprets the instruction; it hands it to whoever takes a row.',
+      inputSchema: {
+        lane: z.string().describe('The lane this sweep belongs to. You have to own it.'),
+        title: z.string().min(1).describe('What the sweep is, in a few words.'),
+        instruction: z
+          .string()
+          .min(1)
+          .describe('What to do to each file. Written for another agent to read, not for Agora.'),
+        paths: z.array(z.string()).min(1).describe('One row per path. All inside your lane.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.openBatch(agentId, {
+          laneId: args.lane,
+          title: args.title,
+          instruction: args.instruction,
+          subjects: args.paths,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'take_rows',
+    {
+      title: 'Take rows off a sweep',
+      description:
+        'Ask for work from a sweep and Agora hands you some. You do not negotiate with the other ' +
+        'agents working it and you never will — that is the point. Claim each file with ' +
+        'claim_file before you write to it, then answer for each row with finish_row.',
+      inputSchema: {
+        sweep: z.string().describe('The sweep id, from read_room.'),
+        count: z.number().int().min(1).max(50).optional().describe('How many rows. Default 1.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.takeRows(agentId, {
+          batchId: args.sweep,
+          count: args.count,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'finish_row',
+    {
+      title: 'Answer for one row',
+      description:
+        'Say what happened to one file: you changed it, you looked and deliberately left it ' +
+        'alone, or you are stuck. A finding is required either way — "nothing to do" on forty ' +
+        'rows is itself the answer to something, and Agora will say so. If several rows are ' +
+        'stuck on the same thing, a person is asked once, not once per row.',
+      inputSchema: {
+        row: z.string(),
+        outcome: z
+          .enum(['done', 'skipped', 'stuck'])
+          .describe('done = changed it. skipped = looked, left it alone. stuck = could not.'),
+        finding: z
+          .string()
+          .min(1)
+          .describe('What you did, or why there was nothing to do, or what stopped you.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.finishRow(agentId, {
+          rowId: args.row,
+          outcome: args.outcome,
+          finding: args.finding,
+          statusNote: args.status_note
         })
       )
   );

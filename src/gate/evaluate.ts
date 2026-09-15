@@ -29,6 +29,7 @@ export type GateCode =
   | 'cross-review-stale'
   | 'cross-review-breaks'
   | 'risk-unsigned'
+  | 'sweep-unfinished'
   | 'evidence-missing'
   | 'conflicts'
   | 'seam-mate-not-ready';
@@ -69,6 +70,8 @@ export interface LaneUnderGate {
    * risky file in your own report does not get you past this.
    */
   unsignedRisks: readonly { rule: RiskRule; paths: string[] }[];
+  /** Sweeps on this lane that still have rows nobody has answered for (Q19). */
+  unfinishedSweeps: readonly { title: string; summary: string }[];
   /** What this lane said would prove it worked (Q18), and whether it has. */
   evidence: { statement: string; produced: boolean } | null;
 }
@@ -105,16 +108,22 @@ export function evaluateMerge(input: GateInput): GateDecision {
     });
   }
 
-  // Territory. A file this lane changed must have been claimed by its owner.
+  // Territory. A file this lane changed must have been claimed *for this lane*.
+  //
+  // For the lane, not by its owner: a grid sweep has several agents working
+  // rows of one lane at once (Q19), and each of them claims the file it is on.
+  // The lane is what owns ground; the holder is who is writing this minute. The
+  // room enforces that only the lane's owner or someone holding one of its rows
+  // can claim for it, so this is not a way in.
   const claimByPath = new Map(claims.map((claim) => [claim.path, claim]));
   const unclaimed: string[] = [];
-  const foreign: { path: string; holder: string }[] = [];
+  const foreign: { path: string; holder: string; laneId: string }[] = [];
   for (const path of changed) {
     const claim = claimByPath.get(path);
     if (claim === undefined) {
       unclaimed.push(path);
-    } else if (claim.holder !== lane.owner) {
-      foreign.push({ path, holder: claim.holder });
+    } else if (claim.laneId !== lane.laneId) {
+      foreign.push({ path, holder: claim.holder, laneId: claim.laneId });
     }
   }
 
@@ -134,7 +143,7 @@ export function evaluateMerge(input: GateInput): GateDecision {
       code: 'foreign-files',
       detail:
         'These files belong to someone else right now: ' +
-        foreign.map((hit) => `${hit.path} (${hit.holder})`).join(', ') +
+        foreign.map((hit) => `${hit.path} (${hit.holder}, for "${hit.laneId}")`).join(', ') +
         '. Claim, do not merge.',
       paths: foreign.map((hit) => hit.path),
       laneId: lane.laneId
@@ -206,6 +215,16 @@ export function evaluateMerge(input: GateInput): GateDecision {
         `${hit.rule.label} is on this room's risk list and nobody has signed off on ` +
         `${hit.paths.join(', ')}. ${hit.rule.why}`,
       paths: hit.paths,
+      laneId: lane.laneId
+    });
+  }
+
+  // A sweep half-swept is a lane that does not know what it did (Q19). Landing
+  // over it would ship "we changed some of the forty files" as if it were done.
+  for (const sweep of lane.unfinishedSweeps) {
+    reasons.push({
+      code: 'sweep-unfinished',
+      detail: `"${sweep.title}" is not finished: ${sweep.summary}.`,
       laneId: lane.laneId
     });
   }

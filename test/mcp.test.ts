@@ -120,6 +120,8 @@ describe('the MCP surface', () => {
         'claim_file',
         'claim_task',
         'dissent',
+        'finish_row',
+        'open_sweep',
         'post_message',
         'read_room',
         'release_file',
@@ -128,6 +130,7 @@ describe('the MCP surface', () => {
         'review_lane',
         'show_evidence',
         'submit_work',
+        'take_rows',
         'why_is_this'
       ]
     );
