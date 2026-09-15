@@ -116,6 +116,9 @@ async function stage(): Promise<Stage> {
     }
   });
   await service.approvePlan('Good split.');
+  // Phase 1 predates the risk list (Q13). Empty here so these tests stay about
+  // the territory rule; test/phase2.test.ts is where the risk list is exercised.
+  await service.setRiskList([]);
 
   const room = service.snapshot();
   const wizard = room.tasks.find((t) => t.title === 'Checkout wizard')?.id as string;
@@ -152,6 +155,11 @@ async function doLaneWork(
     seamChecks: [{ decisionId: s.seamId, satisfied: true, note: 'Integers, minor units.' }]
   });
   await s.service.produceEvidence(agent, { taskId: laneId, note: evidenceNote });
+}
+
+/** The agent across the contract reads the other side's work (Q13). */
+async function crossReview(s: Stage, reviewer: string, laneId: string, note: string): Promise<void> {
+  await s.service.reviewLane(reviewer, { laneId, verdict: 'holds', note });
 }
 
 describe('Phase 1 — the gate refuses what nobody admitted to', () => {
@@ -229,6 +237,9 @@ describe('Phase 1 — the gate refuses what nobody admitted to', () => {
     });
     await s.service.produceEvidence('claude', { taskId: s.wizard, note: 'Flow completes.' });
 
+    await crossReview(s, 'cursor', s.wizard, 'It sends {sku, qty} and reads integers.');
+    await crossReview(s, 'claude', s.pricing, 'It returns integers in minor units.');
+
     const landing = await s.gate.land(s.wizard);
     assert.equal(landing.verdict, 'merge');
     assert.deepEqual(
@@ -263,6 +274,7 @@ describe('Phase 1 — the gate refuses what nobody admitted to', () => {
       seamChecks: [{ decisionId: s.seamId, satisfied: true, note: 'Sends {sku, qty}.' }]
     });
     await s.service.produceEvidence('claude', { taskId: s.wizard, note: 'Flow completes.' });
+    await crossReview(s, 'cursor', s.wizard, 'Its side of the contract is right.');
 
     const decision = await s.gate.evaluate(s.wizard);
     assert.equal(decision.verdict, 'wait');
@@ -308,6 +320,8 @@ describe('Phase 1 — moving a contract takes the work with it', () => {
     await doLaneWork(s, 'claude', s.wizard, {
       'src/checkout/Wizard.tsx': 'export const Wizard = () => null;\n'
     }, 'Flow completes.');
+    await crossReview(s, 'cursor', s.wizard, 'Sends {sku, qty}; correct.');
+    await crossReview(s, 'claude', s.pricing, 'Integers, minor units; correct.');
 
     assert.equal((await s.gate.evaluate(s.wizard)).verdict, 'merge', 'clear before the amendment');
 

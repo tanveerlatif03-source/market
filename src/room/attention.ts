@@ -45,6 +45,12 @@ export interface AttentionItem {
   opensToRoomAt: string | null;
   /** Only someone who can merge may answer this (Q16). */
   needsMergeRights: boolean;
+  /**
+   * Present when answering this item *is* a risk sign-off (Q13): the submission
+   * the person was shown, and the rules they are signing for. A later
+   * submission is not covered by it, which is the whole point.
+   */
+  signOff?: { submissionId: string; ruleIds: string[] };
   resolvedAt: string | null;
   resolvedBy: string | null;
   /** Which option was chosen, and anything they typed. For the record (Q26). */

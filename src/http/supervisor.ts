@@ -31,6 +31,37 @@ export async function handleSupervisorRequest(
     return true;
   }
 
+  // The attention queue (Q8). Answering from here is the fallback for when the
+  // notification the design wants — one that is answerable where it arrives —
+  // is not wired up in this deployment.
+  if (method === 'GET' && path === '/api/attention') {
+    const humanId = url.searchParams.get('human');
+    if (humanId === null) {
+      throw new AgoraError('INVALID', '"human" is required.', 'Pass ?human=<your id>.');
+    }
+    sendJson(res, 200, service.attentionFor(humanId));
+    return true;
+  }
+
+  // Why is this the way it is (Q26).
+  if (method === 'GET' && path === '/api/why') {
+    const file = url.searchParams.get('file');
+    const lane = url.searchParams.get('lane');
+    const contract = url.searchParams.get('contract');
+    if (file !== null) sendJson(res, 200, service.provenance({ kind: 'file', path: file }));
+    else if (lane !== null) sendJson(res, 200, service.provenance({ kind: 'lane', laneId: lane }));
+    else if (contract !== null) {
+      sendJson(res, 200, service.provenance({ kind: 'contract', seamId: contract }));
+    } else {
+      throw new AgoraError(
+        'INVALID',
+        'Ask about one thing.',
+        'Pass ?file=, ?lane= or ?contract=.'
+      );
+    }
+    return true;
+  }
+
   if (method === 'GET' && path === '/api/events') {
     streamEvents(service, req, res, Number(url.searchParams.get('since') ?? '0'));
     return true;
@@ -122,6 +153,50 @@ export async function handleSupervisorRequest(
       if (writeTasks !== undefined) scope.writeTasks = writeTasks;
       sendJson(res, 200, await service.setAgentScope(agentId, scope));
     }
+    return true;
+  }
+
+  if (path === '/api/humans') {
+    sendJson(res, 200, await service.addHuman({
+      id: requireString(body, 'id'),
+      displayName: requireString(body, 'displayName'),
+      canMerge: body.canMerge === true
+    }));
+    return true;
+  }
+
+  if (path === '/api/risks') {
+    const rules = Array.isArray(body.rules) ? body.rules : [];
+    sendJson(res, 200, await service.setRiskList(
+      rules.map((raw) => {
+        const rule = asRecord(raw);
+        return {
+          id: requireString(rule, 'id'),
+          label: requireString(rule, 'label'),
+          paths: optionalStringArray(rule, 'paths') ?? [],
+          why: optionalString(rule, 'why') ?? ''
+        };
+      })
+    ));
+    return true;
+  }
+
+  const answerMatch = /^\/api\/attention\/([^/]+)\/answer$/.exec(path);
+  if (answerMatch !== null) {
+    sendJson(res, 200, await service.answerAttention(requireString(body, 'human'), {
+      itemId: decodeURIComponent(answerMatch[1] as string),
+      optionId: requireString(body, 'option'),
+      note: optionalString(body, 'note')
+    }));
+    return true;
+  }
+
+  const ownerMatch = /^\/api\/tasks\/([^/]+)\/owner$/.exec(path);
+  if (ownerMatch !== null) {
+    sendJson(res, 200, await service.assignLaneOwner(
+      decodeURIComponent(ownerMatch[1] as string),
+      optionalString(body, 'human') ?? null
+    ));
     return true;
   }
 

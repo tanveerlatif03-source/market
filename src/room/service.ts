@@ -17,6 +17,16 @@ import { OPENS_TO_ROOM_AFTER_MS, canAnswer, queueFor } from './attention.ts';
 import type { AttentionItem, AttentionQueue } from './attention.ts';
 import { assessStuck, detectSpin } from './spin.ts';
 import type { StuckVerdict } from './spin.ts';
+import {
+  reviewRequirements,
+  reviewsOwedBy,
+  risksTouched,
+  seamContextOf,
+  unsignedRisks
+} from './review.ts';
+import type { Review, ReviewRequirement, ReviewVerdict, RiskRule } from './review.ts';
+import { provenanceOf } from './provenance.ts';
+import type { Provenance, ProvenanceSubject } from './provenance.ts';
 import type {
   Dissent,
   Human,
@@ -489,6 +499,10 @@ export class RoomService {
       } else {
         task.status = 'submitted';
         task.blockedReason = null;
+        // Finishing is not the end of the lane: the agent across each contract
+        // still has to read it (Q13), and a risky surface still pulls a person.
+        this.requestReviews(room, task, emit);
+        this.flagRisks(room, task, submission, filesChanged, emit);
       }
 
       const audience = unique([
@@ -529,7 +543,10 @@ export class RoomService {
         nextStep:
           input.outcome === 'blocked'
             ? 'The human has been told you are blocked. Wait to be unblocked or redirected.'
-            : 'The human reviews and accepts it. Do not start another lane without claiming it.'
+            : this.reviewersOf(room, task).length > 0
+              ? `Submitted. ${this.reviewersOf(room, task).join(' and ')} now read it across the ` +
+                'contract; nothing lands until they do. Do not start another lane without claiming it.'
+              : 'The human reviews and accepts it. Do not start another lane without claiming it.'
       };
     });
   }
@@ -1656,6 +1673,30 @@ export class RoomService {
       item.resolution = input.note ? `${option.label} — ${input.note}` : option.label;
       human.lastSeenAt = item.resolvedAt;
 
+      // Approving a risk item *is* the sign-off, and it covers exactly the
+      // submission this person was shown (Q13).
+      if (item.signOff !== undefined && input.optionId === 'approve' && item.laneId !== null) {
+        room.signOffs.push({
+          id: shortId('sig'),
+          laneId: item.laneId,
+          submissionId: item.signOff.submissionId,
+          ruleIds: [...item.signOff.ruleIds],
+          by: humanId,
+          note: input.note ?? '',
+          at: item.resolvedAt
+        });
+        emit({
+          type: 'risk.signed',
+          actor: humanId,
+          taskId: item.laneId,
+          threadId: null,
+          summary:
+            `${human.displayName} signed off ${item.signOff.ruleIds.join(', ')} on this ` +
+            `submission of "${item.laneId}". A later submission needs looking at again.`,
+          audience: []
+        });
+      }
+
       emit({
         type: 'attention.answered',
         actor: humanId,
@@ -1783,6 +1824,235 @@ export class RoomService {
         audience: [HUMAN_ID]
       });
       return { message: 'Noted. Saying so was cheaper than another rewrite.' };
+    });
+  }
+
+  // -------------------------------------------------------- cross-review (Q13)
+
+  /**
+   * The agent across a contract reads the other side's work.
+   *
+   * Not a courtesy: nothing lands until it happens. The reviewer is chosen by
+   * the contract, not by policy — it is the one party with both the context to
+   * judge the work and a stake in whether the contract was held.
+   */
+  async reviewLane(
+    agentId: string,
+    input: { laneId: string; seamId?: string; verdict: ReviewVerdict; note: string } & StatusInput
+  ): Promise<{ review: Review; message: string }> {
+    return this.apply((data, emit) => {
+      const room = data.room;
+      const agent = this.agentOf(data, agentId);
+      this.touchPresence(agent, emit);
+      this.requireActive(agent);
+      const task = this.taskOf(room, input.laneId);
+
+      if (task.owner === agentId) {
+        throw new AgoraError(
+          'INVALID',
+          'You cannot review your own lane.',
+          'Cross-review means the agent on the other side of the contract reads it.'
+        );
+      }
+      if (task.status !== 'submitted' && task.status !== 'accepted') {
+        throw new AgoraError(
+          'INVALID',
+          `"${task.id}" is ${task.status}; there is nothing finished to read yet.`,
+          'Wait for it to submit. You are told when it does.'
+        );
+      }
+
+      const requirements = reviewRequirements(seamContextOf(room, task.id));
+      const mine = requirements.filter((requirement) => requirement.reviewer === agentId);
+      if (mine.length === 0) {
+        throw new AgoraError(
+          'UNAUTHORIZED',
+          `You share no contract with "${task.id}", so its work is not yours to pass or fail.`,
+          'Review the lanes across your own seams. read_room lists them.',
+          { owed: reviewsOwedBy(room, agentId) }
+        );
+      }
+
+      const requirement =
+        input.seamId === undefined
+          ? mine[0]
+          : mine.find((candidate) => candidate.seamId === input.seamId);
+      if (requirement === undefined) {
+        throw new AgoraError(
+          'NOT_FOUND',
+          `"${input.seamId}" is not a contract between you and "${task.id}".`,
+          `Yours with this lane: ${mine.map((entry) => entry.seamId).join(', ')}.`
+        );
+      }
+
+      const decision = room.decisions.find((candidate) => candidate.id === requirement.seamId);
+      const submission = task.submissions.at(-1);
+      if (decision === undefined || submission === undefined) {
+        throw new AgoraError('INVALID', 'There is nothing to review against.', 'Wait for a submission.');
+      }
+
+      const review: Review = {
+        id: shortId('rev'),
+        laneId: task.id,
+        seamId: requirement.seamId,
+        by: agentId,
+        verdict: input.verdict,
+        note: input.note,
+        submissionId: submission.id,
+        seamVersion: decision.version,
+        at: nowIso()
+      };
+      room.reviews.push(review);
+
+      emit({
+        type: 'review.recorded',
+        actor: agentId,
+        taskId: task.id,
+        threadId: null,
+        summary:
+          `${agent.displayName} read "${task.id}" against "${decision.title}" v${decision.version}: ` +
+          `${input.verdict === 'holds' ? 'it holds' : 'it breaks'} — ${input.note}`,
+        audience: unique([HUMAN_ID, ...(task.owner !== null ? [task.owner] : [])])
+      });
+
+      // Two agents disagreeing about a contract is exactly the kind of thing a
+      // person is for. It is also the kind of thing neither of them can settle.
+      if (input.verdict === 'breaks') {
+        this.raise(room, emit, {
+          kind: 'ruling',
+          laneId: task.id,
+          title: `${agentId} says "${task.id}" breaks "${decision.title}"`,
+          detail: `${input.note} The contract reads: ${decision.body}`,
+          needsMergeRights: true,
+          options: [
+            { id: 'side-with-reviewer', label: `${agentId} is right`, effect: `"${task.id}" reworks its side.` },
+            { id: 'side-with-lane', label: `"${task.id}" is right`, effect: 'The review is overruled and the lane can land.' },
+            { id: 'amend', label: 'The contract is wrong', effect: 'You change the contract; both sides go stale and re-sign.' }
+          ]
+        });
+      }
+
+      this.touchStatus(agent, emit, { note: input.statusNote });
+      return {
+        review,
+        message:
+          input.verdict === 'holds'
+            ? `Recorded. "${task.id}" can land once everything else clears.`
+            : `Recorded, and a person has been asked to rule on it. "${task.id}" cannot land meanwhile.`
+      };
+    });
+  }
+
+  /** What this agent owes a review on, and why. Cheap enough to show on every read. */
+  reviewsDue(agentId: string): { laneId: string; seamId: string; seamTitle: string; why: string }[] {
+    return this.store.read((data) => reviewsOwedBy(data.room, agentId));
+  }
+
+  /** Where each lane stands on the reviews it owes. */
+  reviewStateOf(laneId: string): ReviewRequirement[] {
+    return this.store.read((data) => reviewRequirements(seamContextOf(data.room, laneId)));
+  }
+
+  /** The surfaces that always pull a person in (Q13). The human's call, not an agent's. */
+  async setRiskList(rules: RiskRule[]): Promise<RiskRule[]> {
+    return this.apply((data, emit) => {
+      data.room.riskList = rules.map((rule) => ({ ...rule, paths: [...rule.paths] }));
+      emit({
+        type: 'risk.flagged',
+        actor: HUMAN_ID,
+        taskId: null,
+        threadId: null,
+        summary:
+          rules.length === 0
+            ? 'The risk list is empty: no surface pulls a person in automatically.'
+            : `The risk list is now ${rules.map((rule) => rule.label).join(', ')}.`,
+        audience: []
+      });
+      return data.room.riskList;
+    });
+  }
+
+  /** Why is this the way it is (Q26). Derived, never stored. */
+  provenance(subject: ProvenanceSubject): Provenance {
+    return this.store.read((data) => provenanceOf(data.room, subject));
+  }
+
+  /** The agents who owe this lane a review right now. */
+  private reviewersOf(room: Room, task: Task): string[] {
+    return unique(
+      reviewRequirements(seamContextOf(room, task.id))
+        .map((requirement) => requirement.reviewer)
+        .filter((reviewer): reviewer is string => reviewer !== null)
+    );
+  }
+
+  /** Tells the agent across each contract that there is something to read. */
+  private requestReviews(room: Room, task: Task, emit: EmitFn): void {
+    for (const requirement of reviewRequirements(seamContextOf(room, task.id))) {
+      if (requirement.reviewer === null || requirement.reviewer === task.owner) continue;
+      emit({
+        type: 'review.requested',
+        actor: task.owner ?? HUMAN_ID,
+        taskId: task.id,
+        threadId: null,
+        summary:
+          `${requirement.reviewer}: read "${task.id}" against "${requirement.seamTitle}". ` +
+          'It cannot land until you do.',
+        audience: [requirement.reviewer]
+      });
+    }
+  }
+
+  /**
+   * Pulls a person onto a risky surface (Q13).
+   *
+   * What the agent declared is used here, because that is all the room knows at
+   * submission time. The gate recomputes it from the diff, so a risky file left
+   * out of the report is caught there instead — later, but not missed.
+   */
+  private flagRisks(
+    room: Room,
+    task: Task,
+    submission: Submission,
+    filesChanged: readonly string[],
+    emit: EmitFn
+  ): void {
+    const claimed = room.claims
+      .filter((claim) => claim.laneId === task.id)
+      .map((claim) => claim.path);
+    const hits = risksTouched(unique([...filesChanged, ...claimed]), room.riskList);
+    const open = unsignedRisks(hits, room.signOffs, {
+      laneId: task.id,
+      latestSubmissionId: submission.id
+    });
+    if (open.length === 0) return;
+
+    const item = this.raise(room, emit, {
+      kind: 'review',
+      laneId: task.id,
+      title: `"${task.id}" touches ${open.map((hit) => hit.rule.label).join(' and ')}`,
+      detail:
+        open
+          .map((hit) => `${hit.rule.label}: ${hit.paths.join(', ')}. ${hit.rule.why}`)
+          .join(' ') + ` The lane says: ${submission.summary}`,
+      needsMergeRights: true,
+      options: [
+        { id: 'approve', label: 'I have looked; it can land', effect: 'This submission is signed off and the gate stops asking.' },
+        { id: 'changes', label: 'Send it back', effect: 'The lane reopens and works on it again.' },
+        { id: 'hold', label: 'Hold it', effect: 'Nothing lands until you come back to it.' }
+      ]
+    });
+    item.signOff = { submissionId: submission.id, ruleIds: open.map((hit) => hit.rule.id) };
+
+    emit({
+      type: 'risk.flagged',
+      actor: task.owner ?? HUMAN_ID,
+      taskId: task.id,
+      threadId: null,
+      summary:
+        `"${task.id}" touches ${open.map((hit) => hit.rule.label).join(', ')}; ` +
+        'a person has to look before it lands.',
+      audience: [HUMAN_ID]
     });
   }
 

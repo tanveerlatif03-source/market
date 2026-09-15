@@ -200,20 +200,44 @@ endpoint rather than more design, and the rules it would enforce are already wri
 
 ### Phase 2 — survives being left alone
 
-- Named lane owner, fifteen-minute timer, room fallback (Q8)
-- Slack notification with the ruling answerable inline (Q11)
-- Spinning detector and the evidence question (Q20)
-- Cross-review at the seam (Q13)
-- Dissent on the record (Q22)
-- Provenance view (Q26)
+- [x] Named lane owner, fifteen-minute timer, room fallback (Q8)
+- [x] Every item answerable from the notification: options with stated effects (Q11)
+- [ ] Slack as the place that notification arrives (Q11)
+- [x] Spinning detector and the evidence question (Q20)
+- [x] Cross-review at the seam, and the risk list that overrides it (Q13)
+- [x] Dissent on the record (Q22)
+- [x] Provenance view (Q26)
 
 **Passes when** nobody looks at the room for two hours and nothing stalls silently, nothing merges
-silently, and the log explains every minute of it.
+silently, and the log explains every minute of it. — **passing**, in `test/phase2.test.ts`, against
+real git.
+
+**What the test actually does.** Two agents, one contract, two people asleep. In the two hours: two
+agents reach for the same file, a lane rewrites one file past the threshold and names the same
+missing thing twice, both lanes submit, and the agent across the contract says the other side broke
+it. Nothing merges — the repository is checked, not the room's word for it — and nothing goes quiet:
+every stall is an item with a name on it, a deadline on that name, and answers that carry their own
+effects. Two hours on, every one of them has opened to the room. Then one person clears the queue
+from the notifications and only then does the set land, together. Removing cross-review, the risk
+list or the timer each fails it.
+
+**What the open box means.** The contract Q11 actually asks for is that a ruling can be settled
+without opening the app: an item carries its own answers, each with the effect stated, and answering
+one is a single call. That is built, tested, and reachable over HTTP at `/api/attention`. What is
+not built is Slack as the transport — an app manifest, an OAuth install, Block Kit for the buttons.
+That is delivery plumbing for a surface that does not exist in this sandbox, and it enforces no rule
+of its own.
+
+**One thing Phase 2 changed under Phase 1.** A lane with a contract now needs the agent across it to
+have read the work before it can land, and a lane touching the risk list needs a person. Phase 1's
+test was written before either existed, so it now does the cross-review step explicitly and turns
+the risk list off — its subject is the territory rule, and Phase 2's test is where the risk list is
+exercised.
 
 ### Phase 3 — a team product
 
 - Several humans, mirrored permissions in anger (Q7, Q16)
-- Risk list for surfaces that always pull a human (Q13)
+- Editing the risk list from the dashboard (Q13) — the list itself landed in Phase 2
 - Metered cost for API-key agents (Q15)
 - Sortable table across lanes (Q19)
 - Room close and archive; contracts seed the next room (Q24)

@@ -1,4 +1,5 @@
 import { nowIso, shortId } from '../ids.ts';
+import { DEFAULT_RISK_LIST } from './review.ts';
 import type { AgoraData, Room, Task } from '../types.ts';
 
 /**
@@ -66,6 +67,9 @@ export function createRoom(options: { name: string; goal: string }): Room {
     attention: [],
     probes: {},
     dissents: [],
+    reviews: [],
+    riskList: DEFAULT_RISK_LIST.map((rule) => ({ ...rule, paths: [...rule.paths] })),
+    signOffs: [],
     threads: [],
     events: [
       {

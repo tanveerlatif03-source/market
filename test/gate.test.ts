@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { evaluateMerge, summarize } from '../src/gate/evaluate.ts';
 import type { GateInput, LaneUnderGate, SeamState } from '../src/gate/evaluate.ts';
 import type { Claim } from '../src/room/claims.ts';
+import type { ReviewRequirement } from '../src/room/review.ts';
 
 const AT = '2026-09-15T12:00:00.000Z';
 
@@ -14,6 +15,19 @@ function seam(overrides: Partial<SeamState> = {}): SeamState {
   return { id: 'dec_quote', title: 'The quote object', currentVersion: 3, signedVersion: 3, satisfied: true, ...overrides };
 }
 
+function review(overrides: Partial<ReviewRequirement> = {}): ReviewRequirement {
+  return {
+    seamId: 'dec_quote',
+    seamTitle: 'The quote object',
+    partnerLaneId: 'pricing',
+    reviewer: 'cursor',
+    state: 'holds',
+    review: null,
+    why: '',
+    ...overrides
+  };
+}
+
 function lane(overrides: Partial<LaneUnderGate> = {}): LaneUnderGate {
   return {
     laneId: 'wizard',
@@ -22,6 +36,8 @@ function lane(overrides: Partial<LaneUnderGate> = {}): LaneUnderGate {
     changedFiles: ['src/checkout/Wizard.tsx'],
     declaredFiles: ['src/checkout/Wizard.tsx'],
     seams: [seam()],
+    reviews: [review()],
+    unsignedRisks: [],
     evidence: { statement: 'The flow completes in under three minutes.', produced: true },
     ...overrides
   };

@@ -10,6 +10,7 @@ import { changedFiles, ensureBranch, mergeBranch, mergesCleanly } from '../git/r
 import type { Repo } from '../git/repo.ts';
 import { evaluateMerge, summarize } from './evaluate.ts';
 import type { GateDecision, LaneUnderGate, SeamState } from './evaluate.ts';
+import { reviewRequirements, risksTouched, seamContextOf, unsignedRisks } from '../room/review.ts';
 import type { RoomService } from '../room/service.ts';
 import type { Room, SeamCheck, Task } from '../types.ts';
 
@@ -153,6 +154,13 @@ export class MergeGate {
         changedFiles: changed,
         declaredFiles: last?.filesChanged ?? [],
         seams: seamStates(room, task, last?.seamChecks ?? []),
+        reviews: reviewRequirements(seamContextOf(room, laneId)),
+        // The diff decides which risky surfaces were touched, not the report.
+        unsignedRisks: unsignedRisks(
+          risksTouched(changed, room.riskList),
+          room.signOffs,
+          { laneId, latestSubmissionId: last?.id ?? null }
+        ),
         evidence:
           task.evidence === null
             ? null

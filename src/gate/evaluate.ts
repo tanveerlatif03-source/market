@@ -13,6 +13,7 @@
  */
 
 import type { Claim } from '../room/claims.ts';
+import type { ReviewRequirement, RiskRule } from '../room/review.ts';
 import { normalizePath } from '../paths.ts';
 
 export type MergeVerdict = 'merge' | 'refuse' | 'wait';
@@ -24,6 +25,10 @@ export type GateCode =
   | 'seam-unsigned'
   | 'seam-stale'
   | 'seam-unsatisfied'
+  | 'cross-review-missing'
+  | 'cross-review-stale'
+  | 'cross-review-breaks'
+  | 'risk-unsigned'
   | 'evidence-missing'
   | 'conflicts'
   | 'seam-mate-not-ready';
@@ -56,6 +61,14 @@ export interface LaneUnderGate {
   /** From the agent's own submission. Compared against the diff, never trusted. */
   declaredFiles: readonly string[];
   seams: readonly SeamState[];
+  /** What the agent across each contract owes this lane, and whether it paid (Q13). */
+  reviews: readonly ReviewRequirement[];
+  /**
+   * Risk rules this lane's *diff* trips that no live human sign-off covers
+   * (Q13). Computed from the diff, not from what the agent declared — hiding a
+   * risky file in your own report does not get you past this.
+   */
+  unsignedRisks: readonly { rule: RiskRule; paths: string[] }[];
   /** What this lane said would prove it worked (Q18), and whether it has. */
   evidence: { statement: string; produced: boolean } | null;
 }
@@ -154,6 +167,47 @@ export function evaluateMerge(input: GateInput): GateDecision {
         laneId: lane.laneId
       });
     }
+  }
+
+  // Cross-review. The agent across the contract has read this, against the
+  // contract as it stands and the code as it stands (Q13).
+  for (const requirement of lane.reviews) {
+    if (requirement.state === 'holds') continue;
+    if (requirement.state === 'unreviewable') {
+      // Nobody holds the other side yet. That lane is not ready either, so the
+      // set cannot land — say the true thing rather than a second one.
+      reasons.push({
+        code: 'cross-review-missing',
+        detail: requirement.why,
+        seamId: requirement.seamId,
+        laneId: lane.laneId
+      });
+      continue;
+    }
+    reasons.push({
+      code:
+        requirement.state === 'breaks'
+          ? ('cross-review-breaks' as const)
+          : requirement.state === 'stale'
+            ? ('cross-review-stale' as const)
+            : ('cross-review-missing' as const),
+      detail: requirement.why,
+      seamId: requirement.seamId,
+      laneId: lane.laneId
+    });
+  }
+
+  // The risk list. A short list of surfaces where a person looks whatever the
+  // agents agreed between themselves (Q13).
+  for (const hit of lane.unsignedRisks) {
+    reasons.push({
+      code: 'risk-unsigned',
+      detail:
+        `${hit.rule.label} is on this room's risk list and nobody has signed off on ` +
+        `${hit.paths.join(', ')}. ${hit.rule.why}`,
+      paths: hit.paths,
+      laneId: lane.laneId
+    });
   }
 
   // Evidence. The only check that asks whether the work was any good (Q18).

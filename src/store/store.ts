@@ -1,10 +1,29 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { DEFAULT_RISK_LIST } from '../room/review.ts';
 import type { AgoraData } from '../types.ts';
 
 /** Events are an audit log, not an archive. Keep the tail bounded. */
 const MAX_EVENTS = 5000;
+
+/**
+ * Fills in collections a room file written by an older build does not have.
+ * Every one of them is empty-by-default, so an absent field and an empty one
+ * mean the same thing — nothing is invented here.
+ */
+function hydrate(data: AgoraData): AgoraData {
+  const room = data.room as Partial<AgoraData['room']> & AgoraData['room'];
+  room.claims ??= [];
+  room.humans ??= [];
+  room.attention ??= [];
+  room.probes ??= {};
+  room.dissents ??= [];
+  room.reviews ??= [];
+  room.signOffs ??= [];
+  room.riskList ??= DEFAULT_RISK_LIST.map((rule) => ({ ...rule, paths: [...rule.paths] }));
+  return data;
+}
 
 /**
  * Holds the whole room in memory and persists it as one JSON file.
@@ -27,7 +46,7 @@ export class AgoraStore {
     if (file === null) return new AgoraStore(null, init());
     try {
       const raw = await readFile(file, 'utf8');
-      return new AgoraStore(file, JSON.parse(raw) as AgoraData);
+      return new AgoraStore(file, hydrate(JSON.parse(raw) as AgoraData));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       const store = new AgoraStore(file, init());

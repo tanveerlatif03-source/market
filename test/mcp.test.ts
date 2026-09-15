@@ -123,8 +123,10 @@ describe('the MCP surface', () => {
         'read_room',
         'release_file',
         'report_missing',
+        'review_lane',
         'show_evidence',
-        'submit_work'
+        'submit_work',
+        'why_is_this'
       ]
     );
     await client.close();

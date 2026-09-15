@@ -1,10 +1,20 @@
 import type { Claim } from './room/claims.ts';
 import type { AttentionItem } from './room/attention.ts';
 import type { StuckProbe } from './room/spin.ts';
+import type { Review, RiskRule, RiskSignOff } from './room/review.ts';
 
 export type { Claim, ClaimState, ClaimHolderActivity } from './room/claims.ts';
 export type { AttentionItem, AttentionKind, AttentionOption, AttentionQueue } from './room/attention.ts';
 export type { SpinSignal, StuckProbe, StuckVerdict } from './room/spin.ts';
+export type {
+  Review,
+  ReviewVerdict,
+  ReviewState,
+  ReviewRequirement,
+  RiskRule,
+  RiskSignOff
+} from './room/review.ts';
+export type { Provenance, ProvenanceEntry, ProvenanceSubject } from './room/provenance.ts';
 
 /**
  * Agora domain types.
@@ -255,7 +265,12 @@ export type RoomEventType =
   | 'attention.opened'
   | 'dissent.recorded'
   | 'spin.detected'
-  | 'spin.stuck';
+  | 'spin.stuck'
+  | 'review.recorded'
+  | 'review.requested'
+  | 'risk.flagged'
+  | 'risk.signed'
+  | 'lane.landed';
 
 export interface RoomEvent {
   seq: number;
@@ -293,6 +308,12 @@ export interface Room {
   probes: Record<string, StuckProbe[]>;
   /** Objections agents registered while complying (Q22). */
   dissents: Dissent[];
+  /** Readings of one lane by the agent across its contract (Q13). */
+  reviews: Review[];
+  /** Surfaces that always pull a person in, whatever the agents say (Q13). */
+  riskList: RiskRule[];
+  /** People having looked at those surfaces, per submission (Q13). */
+  signOffs: RiskSignOff[];
   threads: Thread[];
   events: RoomEvent[];
   eventSeq: number;

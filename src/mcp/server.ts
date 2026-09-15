@@ -26,6 +26,8 @@ function instructionsFor(roomName: string, goal: string): string {
     '- Every message attaches to a task and spends that task\'s message budget. When the budget runs out the task stops and the human is asked.',
     '- Claim every file with claim_file before you write to it, and release it when you are done. Re-claiming a file you hold is how you say you are still on it; holding one you have finished with only blocks someone else.',
     '- If you think a ruling is wrong, use dissent — comply and object at the same time. It stops nothing and costs nothing.',
+    '- When a lane across one of your contracts submits, you are asked to read it. Use review_lane. Nothing on either side lands until you do, so it is not optional and not a courtesy.',
+    '- Use why_is_this to find out what decided a file, a lane or a contract before you argue with it.',
     '- Send only the ask and the answer. Your reasoning and live status go to the human through status_note on any tool call, never to another agent.',
     '- Threads are visible to their participants and to the human. Decisions are visible to everyone, including agents that join later.',
     '',
@@ -370,6 +372,68 @@ export function createAgentMcpServer(service: RoomService, agentId: string): Age
     },
     async (args) =>
       guard(() => service.answerProbe(agentId, { laneId: args.lane, missing: args.missing }))
+  );
+
+  server.registerTool(
+    'review_lane',
+    {
+      title: 'Review the lane across your contract',
+      description:
+        'Read the work on the other side of a contract you share and say whether it holds. You ' +
+        'are asked to do this because you have the context and a stake in the answer — nothing ' +
+        'on either side of the contract lands until you have. Say it breaks and a person rules ' +
+        'on it; say nothing and both lanes sit there.',
+      inputSchema: {
+        lane: z.string().describe('The lane you read. It is across a contract from one of yours.'),
+        verdict: z
+          .enum(['holds', 'breaks'])
+          .describe('Whether their side does what the contract says it does.'),
+        note: z
+          .string()
+          .min(1)
+          .describe('What you checked, concretely. On "breaks", exactly what does not match.'),
+        seam: z.string().optional().describe('Which contract, when you share more than one.'),
+        status_note: statusNote
+      },
+      annotations: { openWorldHint: false }
+    },
+    async (args) =>
+      guard(() =>
+        service.reviewLane(agentId, {
+          laneId: args.lane,
+          verdict: args.verdict,
+          note: args.note,
+          seamId: args.seam,
+          statusNote: args.status_note
+        })
+      )
+  );
+
+  server.registerTool(
+    'why_is_this',
+    {
+      title: 'Why is this the way it is',
+      description:
+        'Ask what decided a file, a lane or a contract: the plan that created it, the contracts ' +
+        'it was built toward, every amendment, who ruled on what, and every objection on the ' +
+        'record. Read this before you argue with something — it is usually the answer.',
+      inputSchema: {
+        file: z.string().optional().describe('A path. What shaped this file.'),
+        lane: z.string().optional().describe('A task id. What shaped this lane.'),
+        contract: z.string().optional().describe('A seam decision id. How this contract got here.'),
+        status_note: statusNote
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false }
+    },
+    async (args) =>
+      guard(async () => {
+        if (args.file !== undefined) return service.provenance({ kind: 'file', path: args.file });
+        if (args.lane !== undefined) return service.provenance({ kind: 'lane', laneId: args.lane });
+        if (args.contract !== undefined) {
+          return service.provenance({ kind: 'contract', seamId: args.contract });
+        }
+        return { reviewsDue: service.reviewsDue(agentId) };
+      })
   );
 
   server.registerResource(
